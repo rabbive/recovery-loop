@@ -18,6 +18,14 @@ describe('Recovery Case aggregate', () => {
     expect(() => withStatus(recovered, 'recovered', '2026-01-01T00:00:02.000Z')).toThrow(InvalidCaseTransitionError);
   });
 
+  it('lets an escalated case still reconcile a real payment success', () => {
+    expect(canTransition('escalated', 'recovered')).toBe(true);
+    expect(canTransition('escalated', 'retry_scheduled')).toBe(false);
+    expect(canTransition('exhausted', 'recovered')).toBe(true);
+    expect(canTransition('recovered', 'escalated')).toBe(false);
+    expect(canTransition('stopped', 'recovered')).toBe(false);
+  });
+
   it('assigns stable append-only audit identities', () => {
     const initial = createRecoveryCase('case', context, '2026-01-01T00:00:00.000Z');
     const first = appendAudit(initial, { type: 'one', actor: 'system', at: '2026-01-01T00:00:01.000Z', explanation: 'first', data: { value: 1 } });

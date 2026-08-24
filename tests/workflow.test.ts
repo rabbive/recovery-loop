@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import type { Diagnosis } from '../src/domain.js';
+import type { Diagnosis, RecoveryCase } from '../src/domain.js';
 import { DeterministicSimulator, FixedClock, type SimulatorScenario } from '../src/provider.js';
 import { DeterministicPolicy, FixtureDiagnosisEngine, InMemoryRecoveryStore, RecoveryWorkflow } from '../src/recovery.js';
+import { DiagnosisUnavailableError } from '../src/diagnosis.js';
 
 const context = {
   customerId: 'customer-1', subscriptionId: 'subscription-1', orderId: 'order-1', amount: 1200, currency: 'INR', dueAt: '2026-01-01T00:00:00.000Z',
@@ -59,6 +60,84 @@ describe('RecoveryWorkflow', () => {
     expect((await hard.workflow.authorize('case-1')).outcome).toBe('escalated');
   });
 
+  it('offers the fallback link when the provider reports the retry ineligible', async () => {
+    const store = new InMemoryRecoveryStore();
+    const provider = new DeterministicSimulator(new Map([['case-1', { retry: 'unsupported', fallback: 'success', diagnosis: 'transient' }]]), new FixedClock('2026-01-01T00:00:00.000Z'));
+    const workflow = new RecoveryWorkflow(store, provider, new FixtureDiagnosisEngine(), new DeterministicPolicy(), new FixedClock('2026-01-01T00:00:00.000Z'));
+    await failed(workflow, provider);
+    await workflow.runDiagnosis('case-1');
+
+    const authorized = await workflow.authorize('case-1');
+
+    expect(authorized.status).toBe('fallback_link_available');
+    expect(authorized.actions.map((recoveryAction) => recoveryAction.kind)).toEqual(['fallback_link']);
+    expect(authorized.audit.some((event) => event.type === 'retry_ineligible')).toBe(true);
+    // Every executed action must carry its own policy authorization.
+    expect(authorized.decisions.map((decision) => [decision.action, decision.allowed])).toEqual([['retry', true], ['fallback_link', true]]);
+    expect((await workflow.executePending('case-1')).actions[0]?.status).toBe('succeeded');
+    expect(provider.calls.map((call) => call.kind)).toEqual(['fallback_link']);
+  });
+
+  it('escalates when the retry is ineligible and the fallback link is already spent', async () => {
+    const store = new InMemoryRecoveryStore();
+    const provider = new DeterministicSimulator(new Map([['case-1', { retry: 'unsupported', fallback: 'failure', diagnosis: 'transient' }]]), new FixedClock('2026-01-01T00:00:00.000Z'));
+    const workflow = new RecoveryWorkflow(store, provider, new FixtureDiagnosisEngine(), new DeterministicPolicy(), new FixedClock('2026-01-01T00:00:00.000Z'));
+    await failed(workflow, provider);
+    await workflow.runDiagnosis('case-1');
+    await workflow.authorize('case-1');
+    expect((await workflow.executePending('case-1')).status).toBe('exhausted');
+
+    const reauthorized = await workflow.authorize('case-1');
+    expect(reauthorized.actions.filter((recoveryAction) => recoveryAction.kind === 'fallback_link')).toHaveLength(1);
+    expect(provider.calls).toHaveLength(1);
+    expect(reauthorized.status).toBe('exhausted');
+  });
+
+  it('applies an allowed non-actionable verdict as an outcome instead of a pending action', async () => {
+    const cases: readonly { action: 'stop' | 'escalate'; status: string }[] = [{ action: 'escalate', status: 'escalated' }, { action: 'stop', status: 'stopped' }];
+    for (const expected of cases) {
+      const store = new InMemoryRecoveryStore();
+      const provider = new DeterministicSimulator(new Map(), new FixedClock('2026-01-01T00:00:00.000Z'));
+      const policy = {
+        decide(_recoveryCase: RecoveryCase, _diagnosis: Diagnosis, now: string) {
+          return { action: expected.action, allowed: true, reason: `policy chose ${expected.action}`, policyVersion: 'test', decidedAt: now };
+        },
+      };
+      const workflow = new RecoveryWorkflow(store, provider, new FixtureDiagnosisEngine(), policy, new FixedClock('2026-01-01T00:00:00.000Z'));
+      await failed(workflow, provider);
+      await workflow.runDiagnosis('case-1');
+
+      const authorized = await workflow.authorize('case-1');
+
+      expect(authorized.status).toBe(expected.status);
+      expect(authorized.actions).toHaveLength(0);
+      expect(provider.calls).toHaveLength(0);
+    }
+  });
+
+  it('records a policy rejection when the stepped-down fallback link is not allowed', async () => {
+    const store = new InMemoryRecoveryStore();
+    const provider = new DeterministicSimulator(new Map([['case-1', { retry: 'unsupported', fallback: 'success', diagnosis: 'transient' }]]), new FixedClock('2026-01-01T00:00:00.000Z'));
+    const policy = {
+      decide(_recoveryCase: RecoveryCase, diagnosis: Diagnosis, now: string) {
+        return diagnosis.recommendedAction === 'retry'
+          ? { action: 'retry' as const, allowed: true, reason: 'retry approved', policyVersion: 'test', decidedAt: now }
+          : { action: 'fallback_link' as const, allowed: false, reason: 'fallback links are disabled for this merchant', policyVersion: 'test', decidedAt: now };
+      },
+    };
+    const workflow = new RecoveryWorkflow(store, provider, new FixtureDiagnosisEngine(), policy, new FixedClock('2026-01-01T00:00:00.000Z'));
+    await failed(workflow, provider);
+    await workflow.runDiagnosis('case-1');
+
+    const authorized = await workflow.authorize('case-1');
+
+    expect(authorized.status).toBe('escalated');
+    expect(authorized.actions).toHaveLength(0);
+    expect(authorized.decisions.map((decision) => [decision.action, decision.allowed])).toEqual([['retry', true], ['fallback_link', false]]);
+    expect(authorized.audit.some((event) => event.type === 'policy_blocked' && event.explanation.includes('disabled'))).toBe(true);
+    expect(provider.calls).toHaveLength(0);
+  });
+
   it('deduplicates events and blocks actions after terminal success', async () => {
     const { workflow, provider } = setup();
     await failed(workflow, provider);
@@ -69,5 +148,137 @@ describe('RecoveryWorkflow', () => {
     await workflow.ingestEvent(provider.normalizeEvent({ id: 'event-2', type: 'payment_succeeded', caseId: 'case-1', occurredAt: '2026-01-01T00:00:02.000Z' }, '2026-01-01T00:00:03.000Z'));
     expect((await workflow.ingestEvent(provider.normalizeEvent({ id: 'event-2', type: 'payment_succeeded', caseId: 'case-1', occurredAt: '2026-01-01T00:00:02.000Z' }, '2026-01-01T00:00:04.000Z'))).status).toBe('recovered');
     expect(provider.calls).toHaveLength(1);
+  });
+});
+
+describe('RecoveryWorkflow diagnosis fail-safe', () => {
+  it('escalates without a money action when the diagnosis engine is unavailable', async () => {
+    const store = new InMemoryRecoveryStore();
+    const provider = new DeterministicSimulator(new Map([['case-1', { retry: 'success', fallback: 'success', diagnosis: 'transient' } as SimulatorScenario]]));
+    const engine = { async diagnose(): Promise<Diagnosis> { throw new DiagnosisUnavailableError('model returned malformed output'); } };
+    const workflow = new RecoveryWorkflow(store, provider, engine, new DeterministicPolicy(), new FixedClock('2026-01-01T00:00:00.000Z'));
+    await failed(workflow, provider);
+
+    const diagnosed = await workflow.runDiagnosis('case-1');
+
+    expect(diagnosed.status).toBe('escalated');
+    expect(diagnosed.diagnosis).toBeUndefined();
+    expect(diagnosed.audit.some((event) => event.type === 'diagnosis_unavailable')).toBe(true);
+    expect((await workflow.authorize('case-1')).actions).toHaveLength(0);
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  function engineOf(diagnose: (recoveryCase: RecoveryCase) => Promise<Diagnosis>) {
+    const store = new InMemoryRecoveryStore();
+    const provider = new DeterministicSimulator(new Map([['case-1', { retry: 'success', fallback: 'success', diagnosis: 'transient' } as SimulatorScenario]]));
+    const delays: number[] = [];
+    const workflow = new RecoveryWorkflow(store, provider, { diagnose }, new DeterministicPolicy(), new FixedClock('2026-01-01T00:00:00.000Z'), {
+      maxDiagnosisAttempts: 3,
+      sleep: async (milliseconds: number) => { delays.push(milliseconds); },
+    });
+    return { workflow, provider, delays };
+  }
+
+  it('backs off between diagnosis attempts and honours an advertised retry-after', async () => {
+    let attempts = 0;
+    const { workflow, provider, delays } = engineOf(async () => {
+      attempts += 1;
+      throw new DiagnosisUnavailableError('model returned HTTP 429', { retryable: true, ...(attempts === 1 ? { retryAfterMilliseconds: 2500 } : {}) });
+    });
+    await failed(workflow, provider);
+
+    await workflow.runDiagnosis('case-1');
+
+    expect(delays).toEqual([2500, 2000]);
+  });
+
+  it('rejects a workflow configured with no diagnosis attempts', () => {
+    const store = new InMemoryRecoveryStore();
+    const provider = new DeterministicSimulator();
+    expect(() => new RecoveryWorkflow(store, provider, new FixtureDiagnosisEngine(), new DeterministicPolicy(), new FixedClock('2026-01-01T00:00:00.000Z'), { maxDiagnosisAttempts: 0 })).toThrow(/maxDiagnosisAttempts/);
+  });
+
+  it('retries a transient model outage within one diagnosis run', async () => {
+    let attempts = 0;
+    const { workflow, provider } = engineOf(async (recoveryCase) => {
+      attempts += 1;
+      if (attempts === 1) throw new DiagnosisUnavailableError('model returned HTTP 429', { retryable: true });
+      return { failureCategory: 'transient', confidence: 0.9, evidence: [recoveryCase.events[0]?.id ?? 'event-1'], recommendedAction: 'retry', explanation: 'recoverable', modelVersion: 'test' };
+    });
+    await failed(workflow, provider);
+
+    const diagnosed = await workflow.runDiagnosis('case-1');
+
+    expect(attempts).toBe(2);
+    expect(diagnosed.status).toBe('diagnosed');
+    expect(diagnosed.audit.filter((event) => event.type === 'diagnosis_unavailable')).toHaveLength(1);
+    expect((await workflow.authorize('case-1')).status).toBe('retry_scheduled');
+  });
+
+  it('escalates rather than stalling when every diagnosis attempt is a transient outage', async () => {
+    let attempts = 0;
+    const { workflow, provider } = engineOf(async () => {
+      attempts += 1;
+      throw new DiagnosisUnavailableError('model returned HTTP 503', { retryable: true });
+    });
+    await failed(workflow, provider);
+
+    const result = await workflow.runDiagnosis('case-1');
+
+    expect(attempts).toBe(3);
+    expect(result.status).toBe('escalated');
+    expect(result.diagnosis).toBeUndefined();
+    expect(result.audit.filter((event) => event.type === 'diagnosis_unavailable')).toHaveLength(3);
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it('authorizes nothing when a case has no diagnosis instead of throwing', async () => {
+    const { workflow, provider } = engineOf(async () => { throw new DiagnosisUnavailableError('model returned HTTP 429', { retryable: true }); });
+    await failed(workflow, provider);
+    await workflow.runDiagnosis('case-1');
+
+    const authorized = await workflow.authorize('case-1');
+
+    expect(authorized.actions).toHaveLength(0);
+    expect(authorized.decisions).toHaveLength(0);
+    expect(provider.calls).toHaveLength(0);
+    expect(await workflow.executePending('case-1')).toBeDefined();
+  });
+
+  it('escalates a terminal model failure even from a mid-flight status', async () => {
+    const store = new InMemoryRecoveryStore();
+    const provider = new DeterministicSimulator(new Map([['case-1', { retry: 'failure', fallback: 'success', diagnosis: 'transient' } as SimulatorScenario]]));
+    let calls = 0;
+    const engine = {
+      async diagnose(recoveryCase: RecoveryCase): Promise<Diagnosis> {
+        calls += 1;
+        if (calls === 1) return { failureCategory: 'transient', confidence: 0.9, evidence: [recoveryCase.events[0]?.id ?? 'event-1'], recommendedAction: 'retry', explanation: 'recoverable', modelVersion: 'test' };
+        throw new DiagnosisUnavailableError('model output is not an object');
+      },
+    };
+    const workflow = new RecoveryWorkflow(store, provider, engine, new DeterministicPolicy(), new FixedClock('2026-01-01T00:00:00.000Z'));
+    await failed(workflow, provider);
+    await workflow.runDiagnosis('case-1');
+    expect((await workflow.authorize('case-1')).status).toBe('retry_scheduled');
+
+    const result = await workflow.runDiagnosis('case-1');
+
+    expect(result.status).toBe('escalated');
+    expect(result.audit.some((event) => event.type === 'diagnosis_unavailable')).toBe(true);
+  });
+
+  it('still attributes a correlated success after the case was escalated', async () => {
+    const { workflow, provider } = setup(undefined, { retry: 'failure', fallback: 'failure', diagnosis: 'transient' });
+    await failed(workflow, provider);
+    await workflow.runDiagnosis('case-1');
+    await workflow.authorize('case-1');
+    await workflow.executePending('case-1');
+    const escalated = await workflow.escalate('case-1', 'operator took over');
+    expect(escalated.status).toBe('escalated');
+
+    const result = await workflow.ingestEvent(provider.normalizeEvent({ id: 'event-9', type: 'payment_succeeded', caseId: 'case-1', occurredAt: '2026-01-01T00:00:06.000Z' }, '2026-01-01T00:00:07.000Z'));
+
+    expect(result.status).toBe('recovered');
+    expect(result.recoveredAmount).toBe(1200);
   });
 });

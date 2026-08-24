@@ -21,9 +21,9 @@ describe('DeterministicSimulator', () => {
     expect(provider.verifyEvent('payload', 'bad')).toBe(false);
   });
 
-  it('only allows recurring mandate retries', () => {
+  it('only allows recurring mandate retries', async () => {
     const provider = new DeterministicSimulator();
     const cardCase = createRecoveryCase('card', { customerId: 'c', subscriptionId: 's', orderId: 'o', amount: 1, currency: 'INR', dueAt: '2026-01-01T00:00:00.000Z' }, '2026-01-01T00:00:00.000Z');
-    expect(provider.retryEligibility(cardCase).eligible).toBe(false);
+    expect((await provider.retryEligibility(cardCase)).eligible).toBe(false);
   });
 });

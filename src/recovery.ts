@@ -75,16 +75,16 @@ export class DeterministicPolicy implements Policy {
 }
 
 export interface RecoveryStore {
-  get(id: string): RecoveryCase | undefined;
-  save(recoveryCase: RecoveryCase): void;
-  all(): RecoveryCase[];
+  get(id: string): Promise<RecoveryCase | undefined>;
+  save(recoveryCase: RecoveryCase): Promise<void>;
+  all(): Promise<RecoveryCase[]>;
 }
 
 export class InMemoryRecoveryStore implements RecoveryStore {
   private readonly cases = new Map<string, RecoveryCase>();
-  get(id: string): RecoveryCase | undefined { return this.cases.get(id); }
-  save(recoveryCase: RecoveryCase): void { this.cases.set(recoveryCase.id, recoveryCase); }
-  all(): RecoveryCase[] { return [...this.cases.values()]; }
+  async get(id: string): Promise<RecoveryCase | undefined> { return this.cases.get(id); }
+  async save(recoveryCase: RecoveryCase): Promise<void> { this.cases.set(recoveryCase.id, recoveryCase); }
+  async all(): Promise<RecoveryCase[]> { return [...this.cases.values()]; }
 }
 
 export class RecoveryWorkflow {
@@ -96,17 +96,17 @@ export class RecoveryWorkflow {
     private readonly clock: Clock,
   ) {}
 
-  openCase(id: string, context: Parameters<typeof createRecoveryCase>[1]): RecoveryCase {
+  async openCase(id: string, context: Parameters<typeof createRecoveryCase>[1]): Promise<RecoveryCase> {
     const now = this.clock.now().toISOString();
     const recoveryCase = appendAudit(createRecoveryCase(id, context, now), {
       type: 'case_opened', actor: 'system', at: now, explanation: 'Recovery Case opened for a failed renewal', data: { orderId: context.orderId },
     });
-    this.store.save(recoveryCase);
+    await this.store.save(recoveryCase);
     return recoveryCase;
   }
 
-  ingestEvent(event: ProviderEvent): RecoveryCase {
-    const current = this.requireCase(event.caseId);
+  async ingestEvent(event: ProviderEvent): Promise<RecoveryCase> {
+    const current = await this.requireCase(event.caseId);
     if (current.events.some((existing) => existing.id === event.id)) return current;
     let updated = addProviderEvent(current, event);
     updated = appendAudit(updated, { type: 'provider_event_received', actor: 'provider', at: event.receivedAt, explanation: `Received ${event.type}`, data: { eventId: event.id } });
@@ -129,22 +129,22 @@ export class RecoveryWorkflow {
     if (event.type === 'subscription_cancelled' || event.type === 'dispute_opened') {
       updated = withStatus(updated, 'escalated', event.receivedAt, 'escalated');
     }
-    this.store.save(updated);
+    await this.store.save(updated);
     return updated;
   }
 
-  runDiagnosis(caseId: string): RecoveryCase {
-    const current = this.requireCase(caseId);
+  async runDiagnosis(caseId: string): Promise<RecoveryCase> {
+    const current = await this.requireCase(caseId);
     if (isTerminal(current.status)) return current;
     const now = this.clock.now().toISOString();
     let updated = withDiagnosis(current, this.diagnosis.diagnose(current), now);
     updated = appendAudit(updated, { type: 'diagnosis_created', actor: 'diagnosis_model', at: now, explanation: updated.diagnosis?.explanation ?? 'Diagnosis created', data: { modelVersion: updated.diagnosis?.modelVersion } });
-    this.store.save(updated);
+    await this.store.save(updated);
     return updated;
   }
 
-  authorize(caseId: string): RecoveryCase {
-    const current = this.requireCase(caseId);
+  async authorize(caseId: string): Promise<RecoveryCase> {
+    const current = await this.requireCase(caseId);
     if (isTerminal(current.status)) return current;
     if (!current.diagnosis) throw new Error('Cannot authorize a case without diagnosis');
     const now = this.clock.now().toISOString();
@@ -153,7 +153,7 @@ export class RecoveryWorkflow {
     updated = appendAudit(updated, { type: decision.allowed ? 'policy_allowed' : 'policy_blocked', actor: 'policy', at: now, explanation: decision.reason, data: { action: decision.action, policyVersion: decision.policyVersion } });
     if (!decision.allowed) {
       updated = withStatus(updated, 'escalated', now, 'escalated');
-      this.store.save(updated);
+      await this.store.save(updated);
       return updated;
     }
     const action: RecoveryAction = {
@@ -166,12 +166,12 @@ export class RecoveryWorkflow {
     updated = addAction(updated, action, now);
     if (decision.action === 'retry') updated = withStatus(updated, 'retry_scheduled', now);
     if (decision.action === 'fallback_link') updated = withStatus(updated, 'fallback_link_available', now);
-    this.store.save(updated);
+    await this.store.save(updated);
     return updated;
   }
 
-  executePending(caseId: string): RecoveryCase {
-    const current = this.requireCase(caseId);
+  async executePending(caseId: string): Promise<RecoveryCase> {
+    const current = await this.requireCase(caseId);
     const action = current.actions.find((candidate) => candidate.status === 'pending');
     if (!action || isTerminal(current.status)) return current;
     const now = this.clock.now().toISOString();
@@ -198,30 +198,30 @@ export class RecoveryWorkflow {
         updated = withDiagnosis(updated, fallbackDiagnosis, now);
       } else if (action.kind === 'fallback_link') updated = withStatus(updated, 'exhausted', now, 'exhausted');
     }
-    this.store.save(updated);
+    await this.store.save(updated);
     return updated;
   }
 
-  stop(caseId: string, reason = 'Stopped by recovery operator'): RecoveryCase {
-    const current = this.requireCase(caseId);
+  async stop(caseId: string, reason = 'Stopped by recovery operator'): Promise<RecoveryCase> {
+    const current = await this.requireCase(caseId);
     const now = this.clock.now().toISOString();
     let updated = withStatus(current, 'stopped', now, 'stopped');
     updated = appendAudit(updated, { type: 'manual_stop', actor: 'operator', at: now, explanation: reason, data: {} });
-    this.store.save(updated);
+    await this.store.save(updated);
     return updated;
   }
 
-  escalate(caseId: string, reason = 'Escalated by recovery operator'): RecoveryCase {
-    const current = this.requireCase(caseId);
+  async escalate(caseId: string, reason = 'Escalated by recovery operator'): Promise<RecoveryCase> {
+    const current = await this.requireCase(caseId);
     const now = this.clock.now().toISOString();
     let updated = withStatus(current, 'escalated', now, 'escalated');
     updated = appendAudit(updated, { type: 'manual_escalation', actor: 'operator', at: now, explanation: reason, data: {} });
-    this.store.save(updated);
+    await this.store.save(updated);
     return updated;
   }
 
-  private requireCase(id: string): RecoveryCase {
-    const recoveryCase = this.store.get(id);
+  private async requireCase(id: string): Promise<RecoveryCase> {
+    const recoveryCase = await this.store.get(id);
     if (!recoveryCase) throw new Error(`Recovery Case not found: ${id}`);
     return recoveryCase;
   }

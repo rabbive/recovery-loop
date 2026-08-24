@@ -1,13 +1,18 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { DeterministicSimulator, FixedClock } from './provider.js';
-import { DeterministicPolicy, FixtureDiagnosisEngine, InMemoryRecoveryStore, RecoveryWorkflow } from './recovery.js';
+import { DeterministicSimulator, FixedClock, RazorpayTestModeProvider, type NormalizedEventInput, type PaymentProvider } from './provider.js';
+import { DeterministicPolicy, FixtureDiagnosisEngine, InMemoryRecoveryStore, RecoveryWorkflow, type RecoveryStore } from './recovery.js';
+import { createPostgresStore } from './persistence.js';
 import { generateEvaluationCases, runEvaluation } from './evaluation.js';
 
 const clock = new FixedClock('2026-01-01T00:00:00.000Z');
-const store = new InMemoryRecoveryStore();
-const provider = new DeterministicSimulator();
+const postgresStore = process.env.DATABASE_URL ? createPostgresStore() : undefined;
+const store: RecoveryStore = postgresStore ?? new InMemoryRecoveryStore();
+const provider: PaymentProvider = process.env.RAZORPAY_KEY_SECRET
+  ? new RazorpayTestModeProvider({ keyId: process.env.RAZORPAY_KEY_ID ?? '', keySecret: process.env.RAZORPAY_KEY_SECRET })
+  : new DeterministicSimulator(new Map(), clock);
+const webhookProvider = provider;
 const workflow = new RecoveryWorkflow(store, provider, new FixtureDiagnosisEngine(), new DeterministicPolicy(), clock);
-let latestEvaluation: ReturnType<typeof runEvaluation> | undefined;
+let latestEvaluation: Awaited<ReturnType<typeof runEvaluation>> | undefined;
 
 function send(response: ServerResponse, status: number, body: string, contentType = 'application/json'): void {
   response.writeHead(status, { 'content-type': `${contentType}; charset=utf-8`, 'cache-control': 'no-store' });
@@ -28,8 +33,8 @@ document.querySelector('#run').onclick=async()=>{await fetch('/api/evaluation',{
 </script></body></html>`;
 }
 
-function metrics() {
-  const cases = store.all();
+async function metrics() {
+  const cases = await store.all();
   if (latestEvaluation) {
     return {
       totalCases: latestEvaluation.totalCases,
@@ -54,21 +59,108 @@ function metrics() {
   };
 }
 
+function readBody(request: IncomingMessage, maximumBytes = 1_000_000): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    let size = 0;
+    request.setEncoding('utf8');
+    request.on('data', (chunk: string) => {
+      size += Buffer.byteLength(chunk);
+      if (size > maximumBytes) {
+        reject(new Error('Webhook body is too large'));
+        request.destroy();
+        return;
+      }
+      body += chunk;
+    });
+    request.on('end', () => resolve(body));
+    request.on('error', reject);
+  });
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function webhookInput(payload: Record<string, unknown>, fallbackId?: string): NormalizedEventInput | undefined {
+  const metadata = typeof payload.metadata === 'object' && payload.metadata !== null ? payload.metadata as Record<string, unknown> : {};
+  const nestedPayload = typeof payload.payload === 'object' && payload.payload !== null ? payload.payload as Record<string, unknown> : {};
+  const payment = typeof nestedPayload.payment === 'object' && nestedPayload.payment !== null ? nestedPayload.payment as Record<string, unknown> : {};
+  const entity = typeof payment.entity === 'object' && payment.entity !== null ? payment.entity as Record<string, unknown> : {};
+  const notes = typeof entity.notes === 'object' && entity.notes !== null ? entity.notes as Record<string, unknown> : {};
+  const caseId = stringValue(payload.caseId) ?? stringValue(metadata.caseId) ?? stringValue(notes.caseId);
+  const id = stringValue(payload.id) ?? stringValue(payload.eventId) ?? fallbackId ?? stringValue(entity.id);
+  const occurredAt = stringValue(payload.occurredAt) ?? stringValue(payload.createdAt) ?? new Date().toISOString();
+  const rawType = stringValue(payload.type) ?? stringValue(payload.event);
+  const type = rawType === 'payment.failed' || rawType === 'payment_failed' ? 'payment_failed'
+    : rawType === 'payment.captured' || rawType === 'payment_succeeded' ? 'payment_succeeded'
+      : rawType === 'payment.authorized' || rawType === 'payment_pending' ? 'payment_pending'
+        : rawType === 'subscription.cancelled' || rawType === 'subscription_cancelled' ? 'subscription_cancelled'
+          : rawType === 'dispute.created' || rawType === 'dispute_opened' ? 'dispute_opened' : 'unknown';
+  if (!caseId || !id) return undefined;
+  const providerPaymentId = stringValue(payload.providerPaymentId);
+  return { id, type, caseId, ...(providerPaymentId === undefined ? {} : { providerPaymentId }), occurredAt, payload };
+}
+
 async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
   const url = new URL(request.url ?? '/', 'http://localhost');
+  if (request.method === 'POST' && url.pathname === '/webhooks/razorpay') {
+    let rawBody: string;
+    try {
+      rawBody = await readBody(request);
+    } catch (error) {
+      return send(response, 413, JSON.stringify({ error: String(error) }));
+    }
+    const signature = request.headers['x-razorpay-signature'];
+    const signatureValue = (Array.isArray(signature) ? signature[0] : signature) ?? '';
+    if (!webhookProvider.verifyEvent(rawBody, signatureValue)) return send(response, 400, JSON.stringify({ error: 'Invalid webhook signature' }));
+    let payload: Record<string, unknown>;
+    try {
+      const parsed: unknown = JSON.parse(rawBody);
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('Webhook JSON must be an object');
+      payload = parsed as Record<string, unknown>;
+    } catch (error) {
+      return send(response, 400, JSON.stringify({ error: `Invalid webhook JSON: ${String(error)}` }));
+    }
+    const eventHeader = request.headers['x-razorpay-event-id'];
+    const eventHeaderValue = (Array.isArray(eventHeader) ? eventHeader[0] : eventHeader) ?? undefined;
+    const input = webhookInput(payload, eventHeaderValue);
+    if (!input) return send(response, 400, JSON.stringify({ error: 'Webhook is missing event id or case id' }));
+    const event = webhookProvider.normalizeEvent(input, clock.now().toISOString());
+    try {
+      const existing = await store.get(event.caseId);
+      const duplicate = existing?.events.some((candidate) => candidate.id === event.id) ?? false;
+      if (!existing) {
+        const context = payload.context;
+        if (event.type !== 'payment_failed' || typeof context !== 'object' || context === null || Array.isArray(context)) {
+          return send(response, 404, JSON.stringify({ error: `Recovery Case not found: ${event.caseId}` }));
+        }
+        const renewal = context as Record<string, unknown>;
+        const required = ['customerId', 'subscriptionId', 'orderId', 'amount', 'currency', 'dueAt'];
+        if (!required.every((key) => key in renewal) || typeof renewal.amount !== 'number') return send(response, 400, JSON.stringify({ error: 'Initial failed webhook is missing renewal context' }));
+        await workflow.openCase(event.caseId, {
+          customerId: String(renewal.customerId), subscriptionId: String(renewal.subscriptionId), orderId: String(renewal.orderId), amount: renewal.amount, currency: String(renewal.currency), dueAt: String(renewal.dueAt),
+        });
+      }
+      const result = await workflow.ingestEvent(event);
+      return send(response, duplicate ? 200 : 202, JSON.stringify({ accepted: true, duplicate, caseId: result.id, status: result.status }));
+    } catch (error) {
+      return send(response, 422, JSON.stringify({ error: String(error) }));
+    }
+  }
   if (request.method === 'GET' && url.pathname === '/') return send(response, 200, dashboard(), 'text/html');
-  if (request.method === 'GET' && url.pathname === '/api/metrics') return send(response, 200, JSON.stringify(metrics()));
-  if (request.method === 'GET' && url.pathname === '/api/cases') return send(response, 200, JSON.stringify(store.all().map((recoveryCase) => ({ id: recoveryCase.id, status: recoveryCase.status, amount: recoveryCase.context.amount, actions: recoveryCase.actions.length, audit: recoveryCase.audit.length }))));
+  if (request.method === 'GET' && url.pathname === '/api/metrics') return send(response, 200, JSON.stringify(await metrics()));
+  if (request.method === 'GET' && url.pathname === '/api/cases') return send(response, 200, JSON.stringify((await store.all()).map((recoveryCase) => ({ id: recoveryCase.id, status: recoveryCase.status, amount: recoveryCase.context.amount, actions: recoveryCase.actions.length, audit: recoveryCase.audit.length }))));
   if (request.method === 'POST' && url.pathname === '/api/evaluation') {
-    const evaluation = runEvaluation(generateEvaluationCases(60, 42));
+    const evaluation = await runEvaluation(generateEvaluationCases(60, 42));
     latestEvaluation = evaluation;
     for (const evaluationCase of evaluation.cases) {
-      if (!store.get(evaluationCase.id)) {
-        workflow.openCase(evaluationCase.id, evaluationCase.context);
-        workflow.ingestEvent(provider.normalizeEvent({ id: `${evaluationCase.id}:failed`, type: 'payment_failed', caseId: evaluationCase.id, occurredAt: clock.now().toISOString(), payload: { method: 'recurring_mandate' } }, clock.now().toISOString()));
-        workflow.runDiagnosis(evaluationCase.id);
-        workflow.authorize(evaluationCase.id);
-        workflow.executePending(evaluationCase.id);
+      if (!(await store.get(evaluationCase.id))) {
+        await workflow.openCase(evaluationCase.id, evaluationCase.context);
+        await workflow.ingestEvent(provider.normalizeEvent({ id: `${evaluationCase.id}:failed`, type: 'payment_failed', caseId: evaluationCase.id, occurredAt: clock.now().toISOString(), payload: { method: 'recurring_mandate' } }, clock.now().toISOString()));
+        await workflow.runDiagnosis(evaluationCase.id);
+        await workflow.authorize(evaluationCase.id);
+        await workflow.executePending(evaluationCase.id);
       }
     }
     return send(response, 200, JSON.stringify(evaluation));
@@ -77,6 +169,14 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
 }
 
 const port = Number(process.env.PORT ?? 3000);
-createServer((request, response) => { void handle(request, response).catch((error: unknown) => send(response, 500, JSON.stringify({ error: String(error) }))); }).listen(port, () => {
-  console.log(`Recovery Loop listening on http://localhost:${port}`);
+const server = createServer((request, response) => { void handle(request, response).catch((error: unknown) => send(response, 500, JSON.stringify({ error: String(error) }))); });
+
+async function bootstrap(): Promise<void> {
+  if (postgresStore) await postgresStore.initialize();
+  server.listen(port, () => console.log(`Recovery Loop listening on http://localhost:${port}`));
+}
+
+void bootstrap().catch((error: unknown) => {
+  console.error('Recovery Loop failed to start', error);
+  process.exitCode = 1;
 });

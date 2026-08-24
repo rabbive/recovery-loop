@@ -72,7 +72,7 @@ export function generateEvaluationCases(count = 60, seed = 42): EvaluationCase[]
   });
 }
 
-export function runEvaluation(cases = generateEvaluationCases()): EvaluationMetrics {
+export async function runEvaluation(cases = generateEvaluationCases()): Promise<EvaluationMetrics> {
   const clock = new FixedClock('2026-01-01T00:00:00.000Z');
   let revenueAtRisk = 0;
   let recoveredAmount = 0;
@@ -86,36 +86,36 @@ export function runEvaluation(cases = generateEvaluationCases()): EvaluationMetr
 
   for (const evaluationCase of cases) {
     const store = new InMemoryRecoveryStore();
-    const provider = new DeterministicSimulator(new Map([[evaluationCase.id, evaluationCase.scenario]]));
+    const provider = new DeterministicSimulator(new Map([[evaluationCase.id, evaluationCase.scenario]]), clock);
     const workflow = new RecoveryWorkflow(store, provider, new FixtureDiagnosisEngine(new Map([[evaluationCase.id, evaluationCase.diagnosis]])), new DeterministicPolicy(), clock);
-    let current = workflow.openCase(evaluationCase.id, evaluationCase.context);
+    let current = await workflow.openCase(evaluationCase.id, evaluationCase.context);
     revenueAtRisk += evaluationCase.context.amount;
-    current = workflow.ingestEvent(provider.normalizeEvent({ id: `${evaluationCase.id}:failed`, type: 'payment_failed', caseId: evaluationCase.id, providerPaymentId: `${evaluationCase.id}:payment`, occurredAt: clock.now().toISOString(), payload: { method: 'recurring_mandate', failureCode: 'temporary' } }, clock.now().toISOString()));
-    current = workflow.runDiagnosis(evaluationCase.id);
+    current = await workflow.ingestEvent(provider.normalizeEvent({ id: `${evaluationCase.id}:failed`, type: 'payment_failed', caseId: evaluationCase.id, providerPaymentId: `${evaluationCase.id}:payment`, occurredAt: clock.now().toISOString(), payload: { method: 'recurring_mandate', failureCode: 'temporary' } }, clock.now().toISOString()));
+    current = await workflow.runDiagnosis(evaluationCase.id);
     if (current.diagnosis?.failureCategory === evaluationCase.diagnosis.failureCategory && current.diagnosis.confidence === evaluationCase.diagnosis.confidence) diagnosisCorrect += 1;
-    current = workflow.authorize(evaluationCase.id);
+    current = await workflow.authorize(evaluationCase.id);
     if (evaluationCase.expected === 'escalated') {
       if (current.status === 'escalated') escalated += 1;
       unsafeActionsPrevented += current.actions.length === 0 ? 1 : 0;
       continue;
     }
-    current = workflow.executePending(evaluationCase.id);
+    current = await workflow.executePending(evaluationCase.id);
     if (evaluationCase.expected === 'retry_recovered') {
       const success = provider.normalizeEvent({ id: `${evaluationCase.id}:success`, type: 'payment_succeeded', caseId: evaluationCase.id, occurredAt: clock.now().toISOString(), payload: {} }, clock.now().toISOString());
-      current = workflow.ingestEvent(success);
+      current = await workflow.ingestEvent(success);
       if (current.status === 'recovered') { recoveredAmount += current.recoveredAmount; retryRecovered += 1; }
     } else {
       // A failed retry installs the bounded fallback-link diagnosis; preserve it rather than asking the model to re-recommend retry.
-      current = workflow.authorize(evaluationCase.id);
-      current = workflow.executePending(evaluationCase.id);
+      current = await workflow.authorize(evaluationCase.id);
+      current = await workflow.executePending(evaluationCase.id);
       if (evaluationCase.expected === 'fallback_recovered') {
         const success = provider.normalizeEvent({ id: `${evaluationCase.id}:fallback-success`, type: 'payment_succeeded', caseId: evaluationCase.id, occurredAt: clock.now().toISOString(), payload: {} }, clock.now().toISOString());
-        current = workflow.ingestEvent(success);
+        current = await workflow.ingestEvent(success);
         if (current.status === 'recovered') { recoveredAmount += current.recoveredAmount; fallbackRecovered += 1; }
       } else if (current.status === 'exhausted') exhausted += 1;
     }
     const before = provider.calls.length;
-    workflow.executePending(evaluationCase.id);
+    await workflow.executePending(evaluationCase.id);
     duplicateActionsPrevented += provider.calls.length === before ? 1 : 0;
   }
 

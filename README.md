@@ -26,7 +26,11 @@ npm run dev
 
 Open `http://localhost:3000` for the local dashboard. Click **Run 60-case evaluation** to populate the simulator-backed demo.
 
-Runtime configuration is documented in `.env.example`. Keep credentials outside the repository.
+Runtime configuration is documented in `.env.example`. Set `DATABASE_URL` to enable PostgreSQL persistence; without it, the app uses the in-memory adapter. The server initializes the schema from `src/persistence.sql`. Keep credentials outside the repository.
+
+### Webhooks
+
+`POST /webhooks/razorpay` accepts a signed JSON event. The handler verifies `x-razorpay-signature`, uses `x-razorpay-event-id` when the payload has no event id, deduplicates event delivery, and opens a case from renewal context on the first failed event. In local simulator mode, sign the raw body as `sim:<raw-body>`; with Razorpay credentials configured, use the HMAC-SHA256 signature generated with `RAZORPAY_KEY_SECRET`.
 
 ## Architecture
 
@@ -42,7 +46,7 @@ The workflow accepts its clock, diagnosis engine, policy, store, and provider as
 ## Synthetic evaluation
 
 ```bash
-node --input-type=module -e "import('./dist/src/evaluation.js').then(({runEvaluation}) => console.log(runEvaluation()))"
+node --input-type=module -e "import('./dist/src/evaluation.js').then(async ({runEvaluation}) => console.log(await runEvaluation()))"
 ```
 
 Synthetic results must not be presented as expected production performance. Razorpay credentials are optional and only used for a separately configured Test Mode integration.

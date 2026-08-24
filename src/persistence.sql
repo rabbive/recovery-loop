@@ -11,8 +11,11 @@ create table if not exists recovery_cases (
   recovered_amount integer not null default 0,
   outcome text,
   created_at timestamptz not null,
-  updated_at timestamptz not null
+  updated_at timestamptz not null,
+  state jsonb not null default '{}'::jsonb
 );
+
+alter table recovery_cases add column if not exists state jsonb not null default '{}'::jsonb;
 
 create table if not exists provider_events (
   id text primary key,

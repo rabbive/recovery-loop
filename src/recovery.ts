@@ -107,8 +107,8 @@ export class RecoveryWorkflow {
 
   async ingestEvent(event: ProviderEvent): Promise<RecoveryCase> {
     const current = await this.requireCase(event.caseId);
-    if (current.events.some((existing) => existing.id === event.id)) return current;
     let updated = addProviderEvent(current, event);
+    if (updated === current) return current;
     updated = appendAudit(updated, { type: 'provider_event_received', actor: 'provider', at: event.receivedAt, explanation: `Received ${event.type}`, data: { eventId: event.id } });
     if (event.type === 'payment_failed' && current.attempts.length === 0) {
       const attempt: PaymentAttempt = {
@@ -127,7 +127,9 @@ export class RecoveryWorkflow {
       else updated = appendAudit(updated, { type: 'pre_existing_success', actor: 'provider', at: event.receivedAt, explanation: 'Success was not caused by a recovery action', data: { eventId: event.id } });
     }
     if (event.type === 'subscription_cancelled' || event.type === 'dispute_opened') {
-      updated = withStatus(updated, 'escalated', event.receivedAt, 'escalated');
+      updated = isTerminal(updated.status)
+        ? appendAudit(updated, { type: 'late_terminal_signal_ignored', actor: 'provider', at: event.receivedAt, explanation: 'A terminal case cannot change state after this provider signal', data: { eventId: event.id } })
+        : withStatus(updated, 'escalated', event.receivedAt, 'escalated');
     }
     await this.store.save(updated);
     return updated;

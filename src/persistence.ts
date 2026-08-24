@@ -54,6 +54,7 @@ export class PostgresRecoveryStore implements RecoveryStore {
   async close(): Promise<void> { await this.pool.end(); }
 }
 
-export function createPostgresStore(config: PoolConfig = {}): PostgresRecoveryStore {
-  return new PostgresRecoveryStore(new Pool({ connectionString: process.env.DATABASE_URL, ...config }));
+export function createPostgresStore(connectionString = process.env.DATABASE_URL, config: PoolConfig = {}): PostgresRecoveryStore {
+  const poolConfig: PoolConfig = connectionString === undefined ? config : { ...config, connectionString };
+  return new PostgresRecoveryStore(new Pool(poolConfig));
 }

@@ -1,17 +1,13 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { DeterministicSimulator, FixedClock, RazorpayTestModeProvider, type NormalizedEventInput, type PaymentProvider } from './provider.js';
-import { DeterministicPolicy, FixtureDiagnosisEngine, InMemoryRecoveryStore, RecoveryWorkflow, type RecoveryStore } from './recovery.js';
-import { createPostgresStore } from './persistence.js';
+import { FixedClock, type NormalizedEventInput } from './provider.js';
+import { createRecoveryApplication } from './application.js';
+import { loadConfig } from './config.js';
 import { generateEvaluationCases, runEvaluation } from './evaluation.js';
 
-const clock = new FixedClock('2026-01-01T00:00:00.000Z');
-const postgresStore = process.env.DATABASE_URL ? createPostgresStore() : undefined;
-const store: RecoveryStore = postgresStore ?? new InMemoryRecoveryStore();
-const provider: PaymentProvider = process.env.RAZORPAY_KEY_SECRET
-  ? new RazorpayTestModeProvider({ keyId: process.env.RAZORPAY_KEY_ID ?? '', keySecret: process.env.RAZORPAY_KEY_SECRET })
-  : new DeterministicSimulator(new Map(), clock);
+const config = loadConfig();
+const application = createRecoveryApplication({ config, clock: new FixedClock('2026-01-01T00:00:00.000Z') });
+const { clock, postgresStore, provider, store, workflow } = application;
 const webhookProvider = provider;
-const workflow = new RecoveryWorkflow(store, provider, new FixtureDiagnosisEngine(), new DeterministicPolicy(), clock);
 let latestEvaluation: Awaited<ReturnType<typeof runEvaluation>> | undefined;
 
 function send(response: ServerResponse, status: number, body: string, contentType = 'application/json'): void {
@@ -168,7 +164,7 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
   send(response, 404, JSON.stringify({ error: 'Not found' }));
 }
 
-const port = Number(process.env.PORT ?? 3000);
+const port = config.port;
 const server = createServer((request, response) => { void handle(request, response).catch((error: unknown) => send(response, 500, JSON.stringify({ error: String(error) }))); });
 
 async function bootstrap(): Promise<void> {

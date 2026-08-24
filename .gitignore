@@ -9,3 +9,7 @@
 # Logs and temporary files
 *.log
 .tmp/
+
+# Node.js
+node_modules/
+dist/

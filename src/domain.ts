@@ -111,8 +111,10 @@ const allowedTransitions: Readonly<Record<CaseStatus, readonly CaseStatus[]>> = 
   retry_scheduled: ['retry_scheduled', 'diagnosed', 'fallback_link_available', 'recovered', 'escalated', 'exhausted', 'stopped'],
   fallback_link_available: ['fallback_link_available', 'recovered', 'exhausted', 'escalated', 'stopped'],
   recovered: ['recovered'],
-  escalated: ['escalated'],
-  exhausted: ['exhausted'],
+  // A case handed to a human, or one that ran out of bounded actions, can still be paid.
+  // Reconciling that success keeps recovered revenue honest; no new action becomes possible.
+  escalated: ['escalated', 'recovered'],
+  exhausted: ['exhausted', 'recovered'],
   stopped: ['stopped'],
 };
 

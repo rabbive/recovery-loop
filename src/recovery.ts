@@ -4,6 +4,7 @@ import {
   addDecision,
   addProviderEvent,
   appendAudit,
+  canTransition,
   createRecoveryCase,
   isTerminal,
   markRecovered,
@@ -19,25 +20,9 @@ import {
   type RecoveryCase,
 } from './domain.js';
 import type { Clock, PaymentProvider } from './provider.js';
+import { DiagnosisUnavailableError as DiagnosisFailure, type DiagnosisEngine as Engine } from './diagnosis.js';
 
-export interface DiagnosisEngine {
-  diagnose(recoveryCase: RecoveryCase): Diagnosis;
-}
-
-export class FixtureDiagnosisEngine implements DiagnosisEngine {
-  constructor(private readonly diagnosisByCase = new Map<string, Diagnosis>()) {}
-
-  diagnose(recoveryCase: RecoveryCase): Diagnosis {
-    return this.diagnosisByCase.get(recoveryCase.id) ?? {
-      failureCategory: 'transient',
-      confidence: 0.95,
-      evidence: recoveryCase.events.map((event) => event.id),
-      recommendedAction: 'retry',
-      explanation: 'The failed renewal has an authorized recurring mandate and no terminal signal.',
-      modelVersion: 'fixture-v1',
-    };
-  }
-}
+export { AnthropicDiagnosisEngine, DiagnosisUnavailableError, FixtureDiagnosisEngine, type DiagnosisEngine } from './diagnosis.js';
 
 export interface Policy {
   decide(recoveryCase: RecoveryCase, diagnosis: Diagnosis, now: string): PolicyDecision;
@@ -87,14 +72,33 @@ export class InMemoryRecoveryStore implements RecoveryStore {
   async all(): Promise<RecoveryCase[]> { return [...this.cases.values()]; }
 }
 
+export interface RecoveryWorkflowOptions {
+  /** Bounded diagnosis attempts per run, including the first. */
+  readonly maxDiagnosisAttempts?: number;
+  /** Backoff seam; tests inject a no-op so retries stay instant and deterministic. */
+  readonly sleep?: (milliseconds: number) => Promise<void>;
+  /** Base backoff applied between diagnosis attempts when the provider advertises no delay. */
+  readonly retryBackoffMilliseconds?: number;
+}
+
 export class RecoveryWorkflow {
+  private readonly maxDiagnosisAttempts: number;
+  private readonly sleep: (milliseconds: number) => Promise<void>;
+  private readonly retryBackoffMilliseconds: number;
+
   constructor(
     private readonly store: RecoveryStore,
     private readonly provider: PaymentProvider,
-    private readonly diagnosis: DiagnosisEngine,
+    private readonly diagnosis: Engine,
     private readonly policy: Policy,
     private readonly clock: Clock,
-  ) {}
+    options: RecoveryWorkflowOptions = {},
+  ) {
+    this.maxDiagnosisAttempts = options.maxDiagnosisAttempts ?? 3;
+    if (!Number.isInteger(this.maxDiagnosisAttempts) || this.maxDiagnosisAttempts < 1) throw new Error(`maxDiagnosisAttempts must be a positive integer: ${this.maxDiagnosisAttempts}`);
+    this.retryBackoffMilliseconds = options.retryBackoffMilliseconds ?? 1000;
+    this.sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+  }
 
   async openCase(id: string, context: Parameters<typeof createRecoveryCase>[1]): Promise<RecoveryCase> {
     const now = this.clock.now().toISOString();
@@ -121,7 +125,7 @@ export class RecoveryWorkflow {
       };
       updated = addAttempt(updated, attempt);
     }
-    if (event.type === 'payment_succeeded' && !isTerminal(current.status)) {
+    if (event.type === 'payment_succeeded' && canTransition(current.status, 'recovered')) {
       const recoveryAction = current.actions.find((action) => action.kind === 'retry' || action.kind === 'fallback_link');
       if (recoveryAction) updated = markRecovered(updated, event.occurredAt);
       else updated = appendAudit(updated, { type: 'pre_existing_success', actor: 'provider', at: event.receivedAt, explanation: 'Success was not caused by a recovery action', data: { eventId: event.id } });
@@ -139,7 +143,29 @@ export class RecoveryWorkflow {
     const current = await this.requireCase(caseId);
     if (isTerminal(current.status)) return current;
     const now = this.clock.now().toISOString();
-    let updated = withDiagnosis(current, this.diagnosis.diagnose(current), now);
+    let produced: Diagnosis | undefined;
+    let failing = current;
+    // A transient model outage is retried a bounded number of times inside this run. Nothing
+    // else re-drives a case, so exhausting the attempts must escalate rather than stall.
+    for (let attempt = 1; attempt <= this.maxDiagnosisAttempts && produced === undefined; attempt += 1) {
+      try {
+        produced = await this.diagnosis.diagnose(failing);
+      } catch (error) {
+        const reason = error instanceof DiagnosisFailure ? error.message : `Diagnosis unavailable: ${error instanceof Error ? error.message : String(error)}`;
+        const retryable = error instanceof DiagnosisFailure && error.retryable;
+        failing = appendAudit(failing, { type: 'diagnosis_unavailable', actor: 'diagnosis_model', at: now, explanation: reason, data: { retryable, attempt } });
+        if (!retryable || attempt === this.maxDiagnosisAttempts) {
+          // Model failure must never authorize a money action: hand the case to a human.
+          const escalated = withStatus(failing, 'escalated', now, 'escalated');
+          await this.store.save(escalated);
+          return escalated;
+        }
+        const advertised = error instanceof DiagnosisFailure ? error.retryAfterMilliseconds : undefined;
+        await this.sleep(advertised ?? this.retryBackoffMilliseconds * attempt);
+      }
+    }
+    if (produced === undefined) throw new Error('Diagnosis loop ended without a diagnosis');
+    let updated = withDiagnosis(failing, produced, now);
     updated = appendAudit(updated, { type: 'diagnosis_created', actor: 'diagnosis_model', at: now, explanation: updated.diagnosis?.explanation ?? 'Diagnosis created', data: { modelVersion: updated.diagnosis?.modelVersion } });
     await this.store.save(updated);
     return updated;
@@ -148,7 +174,8 @@ export class RecoveryWorkflow {
   async authorize(caseId: string): Promise<RecoveryCase> {
     const current = await this.requireCase(caseId);
     if (isTerminal(current.status)) return current;
-    if (!current.diagnosis) throw new Error('Cannot authorize a case without diagnosis');
+    // No diagnosis means nothing was recommended; authorizing nothing is the safe outcome.
+    if (!current.diagnosis) return current;
     const now = this.clock.now().toISOString();
     const decision = this.policy.decide(current, current.diagnosis, now);
     let updated = addDecision(current, decision);
@@ -158,16 +185,42 @@ export class RecoveryWorkflow {
       await this.store.save(updated);
       return updated;
     }
+    let kind = decision.action;
+    if (kind === 'retry') {
+      // Policy may approve a retry the provider cannot actually perform on this payment method.
+      // The fallback link needs no mandate, so step down the ladder rather than discarding it.
+      const eligibility = await this.provider.retryEligibility(current);
+      if (!eligibility.eligible) {
+        updated = appendAudit(updated, { type: 'retry_ineligible', actor: 'provider', at: now, explanation: eligibility.reason, data: { action: decision.action } });
+        // Policy remains the only authorizer: ask it about the fallback link on its own terms.
+        const steppedDown = this.policy.decide(current, { ...current.diagnosis, recommendedAction: 'fallback_link', explanation: eligibility.reason }, now);
+        updated = addDecision(updated, steppedDown);
+        updated = appendAudit(updated, { type: steppedDown.allowed ? 'policy_allowed' : 'policy_blocked', actor: 'policy', at: now, explanation: steppedDown.reason, data: { action: steppedDown.action, policyVersion: steppedDown.policyVersion } });
+        if (!steppedDown.allowed) {
+          updated = withStatus(updated, 'escalated', now, 'escalated');
+          await this.store.save(updated);
+          return updated;
+        }
+        kind = steppedDown.action;
+      }
+    }
+    if (kind !== 'retry' && kind !== 'fallback_link') {
+      // An allowed verdict that moves no money is an outcome, not a pending provider operation.
+      const status = kind === 'stop' ? 'stopped' : 'escalated';
+      updated = withStatus(updated, status, now, status);
+      await this.store.save(updated);
+      return updated;
+    }
     const action: RecoveryAction = {
-      id: `${caseId}:action:${decision.action}:${current.actions.length + 1}`,
-      kind: decision.action,
+      id: `${caseId}:action:${kind}:${current.actions.length + 1}`,
+      kind,
       status: 'pending',
-      idempotencyKey: `${caseId}:${decision.action}`,
+      idempotencyKey: `${caseId}:${kind}`,
       createdAt: now,
     };
     updated = addAction(updated, action, now);
-    if (decision.action === 'retry') updated = withStatus(updated, 'retry_scheduled', now);
-    if (decision.action === 'fallback_link') updated = withStatus(updated, 'fallback_link_available', now);
+    if (kind === 'retry') updated = withStatus(updated, 'retry_scheduled', now);
+    if (kind === 'fallback_link') updated = withStatus(updated, 'fallback_link_available', now);
     await this.store.save(updated);
     return updated;
   }
@@ -179,9 +232,9 @@ export class RecoveryWorkflow {
     const now = this.clock.now().toISOString();
     let updated = current;
     const result = action.kind === 'retry'
-      ? this.provider.submitRetry(current, action)
+      ? await this.provider.submitRetry(current, action)
       : action.kind === 'fallback_link'
-        ? this.provider.createFallbackLink(current, action)
+        ? await this.provider.createFallbackLink(current, action)
         : { status: 'succeeded' as const, message: 'Manual action completed' };
     const actionUpdate: Partial<RecoveryAction> = {
       status: result.status === 'failed' ? 'failed' : result.status === 'succeeded' ? 'succeeded' : 'submitted',

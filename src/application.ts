@@ -1,6 +1,7 @@
 import { DeterministicSimulator, FixedClock, RazorpayTestModeProvider, SystemClock, type Clock, type PaymentProvider } from './provider.js';
 import { createPostgresStore, type PostgresRecoveryStore } from './persistence.js';
-import { DeterministicPolicy, FixtureDiagnosisEngine, InMemoryRecoveryStore, RecoveryWorkflow, type RecoveryStore } from './recovery.js';
+import { DeterministicPolicy, InMemoryRecoveryStore, RecoveryWorkflow, type RecoveryStore } from './recovery.js';
+import { AnthropicDiagnosisEngine, AnthropicMessagesModel, FixtureDiagnosisEngine, type DiagnosisEngine } from './diagnosis.js';
 import type { RuntimeConfig } from './config.js';
 
 export interface RecoveryApplication {
@@ -8,6 +9,7 @@ export interface RecoveryApplication {
   readonly clock: Clock;
   readonly store: RecoveryStore;
   readonly provider: PaymentProvider;
+  readonly diagnosisEngine: DiagnosisEngine;
   readonly workflow: RecoveryWorkflow;
   readonly postgresStore?: PostgresRecoveryStore;
 }
@@ -17,6 +19,7 @@ export interface RecoveryApplicationOptions {
   readonly clock?: Clock;
   readonly store?: RecoveryStore;
   readonly provider?: PaymentProvider;
+  readonly diagnosisEngine?: DiagnosisEngine;
 }
 
 export function createRecoveryApplication(options: RecoveryApplicationOptions): RecoveryApplication {
@@ -26,6 +29,13 @@ export function createRecoveryApplication(options: RecoveryApplicationOptions): 
   const provider = options.provider ?? (options.config.razorpayKeySecret === undefined
     ? new DeterministicSimulator(new Map(), clock)
     : new RazorpayTestModeProvider({ keyId: options.config.razorpayKeyId ?? '', keySecret: options.config.razorpayKeySecret }));
-  const workflow = new RecoveryWorkflow(store, provider, new FixtureDiagnosisEngine(), new DeterministicPolicy(), clock);
-  return { config: options.config, clock, store, provider, workflow, ...(postgresStore === undefined ? {} : { postgresStore }) };
+  const diagnosisEngine = options.diagnosisEngine ?? (options.config.anthropicApiKey === undefined
+    ? new FixtureDiagnosisEngine()
+    : new AnthropicDiagnosisEngine(new AnthropicMessagesModel({
+      apiKey: options.config.anthropicApiKey,
+      ...(options.config.anthropicModel === undefined ? {} : { model: options.config.anthropicModel }),
+      ...(options.config.diagnosisTimeoutMilliseconds === undefined ? {} : { timeoutMilliseconds: options.config.diagnosisTimeoutMilliseconds }),
+    })));
+  const workflow = new RecoveryWorkflow(store, provider, diagnosisEngine, new DeterministicPolicy(), clock);
+  return { config: options.config, clock, store, provider, diagnosisEngine, workflow, ...(postgresStore === undefined ? {} : { postgresStore }) };
 }

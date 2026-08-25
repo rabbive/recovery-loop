@@ -1,5 +1,5 @@
 import { DiagnosisUnavailableError, type DiagnosisEngine } from './diagnosis.js';
-import type { CaseStatus, Diagnosis, FailureCategory, ProviderEvent, RecoveryCase, RenewalContext } from './domain.js';
+import type { AuditEvent, CaseStatus, Diagnosis, FailureCategory, ProviderEvent, RecoveryCase, RenewalContext } from './domain.js';
 import { DeterministicSimulator, FixedClock, type SimulatorScenario } from './provider.js';
 import { DeterministicPolicy, InMemoryRecoveryStore, POLICY_VERSION, RecoveryWorkflow } from './recovery.js';
 
@@ -563,14 +563,34 @@ async function runCase(evaluationCase: EvaluationCase, startedAt: string, engine
     // provider called ineligible is a capability miss the loop steps down from, after which the
     // customer may still be charged through the fallback link. Both are counted on their own
     // rather than inflating a figure a reader takes as "the policy engine stopped a bad charge".
-    unsafeActionsPrevented: settled.audit.filter((event) => event.type === 'policy_blocked' && (event.data.action === 'retry' || event.data.action === 'fallback_link')).length,
-    recommendationsRefused: settled.audit.filter((event) => event.type === 'policy_blocked' && event.data.action !== 'retry' && event.data.action !== 'fallback_link').length,
-    providerIneligibleRetries: settled.audit.filter((event) => event.type === 'retry_ineligible').length,
+    ...tallyRefusals(settled.audit),
     duplicateActionsPrevented,
     duplicateEventsIgnored,
     lateEventsIgnored: settled.audit.filter((event) => event.type === 'late_event_ignored').length,
     auditEvents: settled.audit.length,
     recoveryCase: settled,
+  };
+}
+
+/**
+ * Splits the refusals in an audit trail three ways, because they mean different things to a
+ * merchant. A charge deterministic policy refused is a safety control that fired. Policy refusing
+ * a recommendation that proposed no charge — an escalation the diagnosis itself asked for —
+ * prevented nothing. A retry the provider called ineligible is a capability miss the loop steps
+ * down from, after which the customer may still be charged through the fallback link. Folding any
+ * of them together inflates the one figure a reader takes as "a bad charge was stopped".
+ */
+export function tallyRefusals(audit: readonly AuditEvent[]): {
+  unsafeActionsPrevented: number;
+  recommendationsRefused: number;
+  providerIneligibleRetries: number;
+} {
+  const blocked = audit.filter((event) => event.type === 'policy_blocked');
+  const refusedCharges = blocked.filter((event) => event.data.action === 'retry' || event.data.action === 'fallback_link');
+  return {
+    unsafeActionsPrevented: refusedCharges.length,
+    recommendationsRefused: blocked.length - refusedCharges.length,
+    providerIneligibleRetries: audit.filter((event) => event.type === 'retry_ineligible').length,
   };
 }
 

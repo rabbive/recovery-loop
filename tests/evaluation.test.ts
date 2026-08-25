@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import type { RecoveryCase } from '../src/domain.js';
+import type { AuditEvent, RecoveryCase } from '../src/domain.js';
 import { FixtureDiagnosisEngine } from '../src/recovery.js';
 import {
   EVALUATION_ARCHETYPES,
   generateEvaluationCases,
   runEvaluation,
+  tallyRefusals,
   type EvaluationReport,
 } from '../src/evaluation.js';
 
@@ -12,6 +13,11 @@ const SEED = 42;
 
 async function runSeededBatch(count = 60, seed = SEED): Promise<EvaluationReport> {
   return runEvaluation(generateEvaluationCases(count, seed));
+}
+
+/** One audit event, carrying only the fields the refusal tally reads. */
+function auditEvent(type: string, data: Record<string, unknown>): AuditEvent {
+  return { id: `audit-${type}-${JSON.stringify(data)}`, caseId: 'case-1', type, actor: 'policy', at: '2026-01-01T00:00:00.000Z', explanation: type, data };
 }
 
 describe('seeded evaluation dataset', () => {
@@ -170,6 +176,26 @@ describe('evaluation run', () => {
     for (const result of results.filter((candidate) => candidate.duplicateActionsPrevented > 0)) {
       expect(result.retryActions + result.fallbackActions).toBeGreaterThan(0);
     }
+  });
+
+  it('separates a refused charge from a refused recommendation and a provider capability miss', () => {
+    // Seed 42 contains no case where policy had to refuse a charge, so every batch assertion on
+    // `unsafeActionsPrevented` is zero-valued. Without this, the counter could return a constant
+    // 0 and ship as the merchant's "charges policy refused" tile with nothing to catch it.
+    const audit = [
+      auditEvent('policy_blocked', { action: 'retry' }),
+      auditEvent('policy_blocked', { action: 'fallback_link' }),
+      auditEvent('policy_blocked', { action: 'escalate' }),
+      auditEvent('policy_blocked', { action: 'stop' }),
+      auditEvent('retry_ineligible', {}),
+      auditEvent('policy_allowed', { action: 'retry' }),
+    ];
+
+    expect(tallyRefusals(audit)).toEqual({
+      unsafeActionsPrevented: 2,
+      recommendationsRefused: 2,
+      providerIneligibleRetries: 1,
+    });
   });
 
   it('counts only refused money actions as unsafe actions prevented', async () => {

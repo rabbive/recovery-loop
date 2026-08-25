@@ -2,7 +2,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { RecoveryApplication } from './application.js';
 import type { NormalizedEventInput } from './provider.js';
 import { caseStatuses, terminalStatuses, type CaseStatus, type RecoveryCase } from './domain.js';
-import { generateEvaluationCases, runEvaluation, type EvaluationRun } from './evaluation.js';
+import { fallbackRecoveryMessage } from './messaging.js';
+import { generateEvaluationCases, runEvaluation, toEvaluationRun } from './evaluation.js';
 
 function send(response: ServerResponse, status: number, body: string, contentType = 'application/json'): void {
   response.writeHead(status, { 'content-type': `${contentType}; charset=utf-8`, 'cache-control': 'no-store' });
@@ -24,6 +25,7 @@ code{background:#eef2ff;padding:2px 4px;border-radius:4px}.muted{color:#64748b}.
 .panel{background:white;border:1px solid #dfe3e8;border-radius:10px;padding:18px;margin-top:12px}
 .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;background:#eef2ff;color:#155eef}.pill.no{background:#fef3f2;color:#b42318}
 ul{margin:6px 0;padding-left:20px}li{font-size:14px}.timeline li{margin-bottom:6px}
+pre.preview{background:#f8fafc;border:1px solid #e5e7eb;border-radius:8px;padding:12px;white-space:pre-wrap;font:14px system-ui;margin:6px 0}
 </style></head>
 <body><main><h1>Recovery Loop</h1><p class="muted">Synthetic recovery control plane · AI recommends, deterministic policy authorizes.</p>
 <div class="row"><button id="run">Run 60-case evaluation</button><label class="muted">Status
@@ -43,11 +45,12 @@ let selected=null;
 const get=path=>fetch(path).then(r=>r.json());
 
 function renderMetrics(m){
+  const b=m.batch;
   const tiles=[['Revenue at risk',money(m.revenueAtRisk,'INR')],['Recovered',money(m.recoveredAmount,'INR')],['Recovery rate',(m.recoveryRate*100).toFixed(1)+'%'],['Cases',m.totalCases],['Escalated',m.escalated],['Exhausted',m.exhausted]];
-  if(m.retryRecoveryRate!==undefined)tiles.push(['First-attempt recoveries',(m.retryRecoveryRate*100).toFixed(1)+'%'],['Fallback-link recoveries',(m.fallbackRecoveryRate*100).toFixed(1)+'%']);
-  if(m.unsafeActionsPrevented!==undefined)tiles.push(['Unsafe prevented',m.unsafeActionsPrevented],['Duplicates prevented',m.duplicateActionsPrevented],['Diagnosis accuracy',(m.diagnosisAccuracy*100).toFixed(1)+'%']);
+  // The batch's own scoring is the only thing the live projection cannot know: ground truth.
+  if(b)tiles.push(['Batch first-attempt',(b.retryRecoveryRate*100).toFixed(1)+'%'],['Batch fallback',(b.fallbackRecoveryRate*100).toFixed(1)+'%'],['Batch unsafe prevented',b.unsafeActionsPrevented],['Batch duplicates prevented',b.duplicateActionsPrevented],['Batch diagnosis accuracy',(b.diagnosisAccuracy*100).toFixed(1)+'%']);
   document.querySelector('#cards').innerHTML=tiles.map(t=>'<div class="card"><div class="label">'+t[0]+'</div><div class="value">'+esc(t[1])+'</div></div>').join('');
-  document.querySelector('#batch').textContent=m.seed===undefined?'Live cases only — no batch has run yet.':'Seeded batch '+m.seed+' · dataset '+m.datasetVersion+' · policy '+m.policyVersion+' · synthetic';
+  document.querySelector('#batch').textContent=b?'Live figures over all stored cases · seeded batch '+b.seed+' published '+m.batchRecordedAt+' (dataset '+b.datasetVersion+', policy '+b.policyVersion+') · every figure synthetic':'Live figures over all stored cases · no batch published yet · every figure synthetic';
 }
 
 function renderCases(cases){
@@ -65,6 +68,7 @@ function renderDetail(c){
     '<h4>Diagnosis</h4>'+(d?'<p>'+esc(d.failureCategory)+' · confidence '+(d.confidence*100).toFixed(0)+'% · recommends '+esc(d.recommendedAction)+' · model '+esc(d.modelVersion)+'</p><p>'+esc(d.explanation)+'</p><ul>'+d.evidence.map(e=>'<li>'+esc(e)+'</li>').join('')+'</ul>':'<p class="muted">No diagnosis recorded.</p>')+
     '<h4>Policy decisions</h4>'+(c.decisions.length?'<ul>'+c.decisions.map(x=>'<li><span class="pill'+(x.allowed?'':' no')+'">'+(x.allowed?'allowed':'blocked')+'</span> '+esc(x.action)+' — '+esc(x.reason)+' <span class="muted">('+esc(x.policyVersion)+' at '+esc(x.decidedAt)+')</span></li>').join('')+'</ul>':'<p class="muted">None.</p>')+
     '<h4>Recovery actions</h4>'+(c.actions.length?'<ul>'+c.actions.map(a=>'<li>'+esc(a.kind)+' · '+esc(a.status)+(a.providerReference?' · '+esc(a.providerReference):'')+(a.expiresAt?' · expires '+esc(a.expiresAt):'')+(a.result?' · '+esc(a.result):'')+'</li>').join('')+'</ul>':'<p class="muted">None.</p>')+
+    (c.fallbackMessage?'<h4>Fallback message preview</h4><p class="muted">Preview only — the MVP integrates no email, SMS, WhatsApp, or voice provider'+(c.fallbackMessage.expired?', and this link has expired':'')+'.</p><p><strong>'+esc(c.fallbackMessage.subject)+'</strong></p><pre class="preview">'+esc(c.fallbackMessage.body)+'</pre>':'')+
     '<h4>Payment attempts</h4>'+(c.attempts.length?'<ul>'+c.attempts.map(a=>'<li>'+esc(a.method)+' · '+esc(a.status)+(a.failureCode?' · '+esc(a.failureCode):'')+' · '+esc(a.occurredAt)+'</li>').join('')+'</ul>':'<p class="muted">None.</p>')+
     '<h4>Audit timeline</h4><ul class="timeline">'+c.audit.map(e=>'<li><code>'+esc(e.at)+'</code> <strong>'+esc(e.type)+'</strong> <span class="muted">('+esc(e.actor)+')</span> — '+esc(e.explanation)+(Object.keys(e.data).length?' <span class="muted">'+esc(JSON.stringify(e.data))+'</span>':'')+'</li>').join('')+'</ul>';
   const applyVerdict=async suffix=>{await fetch('/api/cases/'+encodeURIComponent(c.id)+suffix,{method:'POST'});await refresh();await openCase(c.id)};
@@ -177,7 +181,7 @@ function caseSummary(recoveryCase: RecoveryCase) {
  * timeline behind all of it. The aggregate is already the audit record, so this projects it
  * rather than summarizing it — nothing an operator would need to explain a decision is dropped.
  */
-function caseDetail(recoveryCase: RecoveryCase) {
+function caseDetail(recoveryCase: RecoveryCase, now: string) {
   return {
     id: recoveryCase.id,
     status: recoveryCase.status,
@@ -192,6 +196,7 @@ function caseDetail(recoveryCase: RecoveryCase) {
     attempts: recoveryCase.attempts,
     events: recoveryCase.events.map(({ id, type, providerPaymentId, occurredAt, receivedAt }) => ({ id, type, providerPaymentId: providerPaymentId ?? null, occurredAt, receivedAt })),
     audit: recoveryCase.audit,
+    fallbackMessage: fallbackRecoveryMessage(recoveryCase, now) ?? null,
   };
 }
 
@@ -205,33 +210,15 @@ export type CaseDetail = ReturnType<typeof caseDetail>;
 export function createRequestListener(application: RecoveryApplication): (request: IncomingMessage, response: ServerResponse) => void {
   const { clock, evaluationRuns, provider, store, workflow } = application;
 
+  /**
+   * The live projection over stored cases, always — a published batch reports beside it rather
+   * than replacing it, because runs are durable and a batch that shadowed the live figures would
+   * do so permanently. The batch drove its cases through this same loop, so it is already part of
+   * the live totals; `batch` adds what only a seeded run can know: its ground-truth scoring.
+   */
   async function metrics() {
     const cases = await store.all();
-    const latestEvaluation = await evaluationRuns.latestRun();
-    // A completed batch is the honest headline: its totals reconcile to individual case outcomes.
-    // `revenueAtRisk` keeps the same meaning as the live projection below — renewal value the loop
-    // did not collect — so the dashboard number does not change definition once a batch has run.
-    if (latestEvaluation) {
-      const { metrics: batch } = latestEvaluation;
-      return {
-        totalCases: batch.totalCases,
-        revenueAtRisk: batch.unrecoveredAmount,
-        failedRenewalValue: batch.failedRenewalValue,
-        recoveredAmount: batch.recoveredAmount,
-        recoveryRate: batch.recoveryRate,
-        retryRecoveryRate: batch.retryRecoveryRate,
-        fallbackRecoveryRate: batch.fallbackRecoveryRate,
-        escalated: batch.escalatedCases,
-        exhausted: batch.exhaustedCases,
-        diagnosisAccuracy: batch.diagnosisAccuracy,
-        unsafeActionsPrevented: batch.unsafeActionsPrevented,
-        duplicateActionsPrevented: batch.duplicateActionsPrevented,
-        seed: batch.seed,
-        datasetVersion: batch.datasetVersion,
-        policyVersion: batch.policyVersion,
-        synthetic: true,
-      };
-    }
+    const publishedRun = await evaluationRuns.latestRun();
     return {
       totalCases: cases.length,
       revenueAtRisk: cases.reduce((sum, recoveryCase) => sum + (recoveryCase.status === 'recovered' ? 0 : recoveryCase.context.amount), 0),
@@ -239,7 +226,10 @@ export function createRequestListener(application: RecoveryApplication): (reques
       recoveryRate: cases.length === 0 ? 0 : cases.filter((recoveryCase) => recoveryCase.status === 'recovered').length / cases.length,
       escalated: cases.filter((recoveryCase) => recoveryCase.status === 'escalated').length,
       exhausted: cases.filter((recoveryCase) => recoveryCase.status === 'exhausted').length,
+      // Every figure this MVP publishes comes from synthetic data, live projection included.
       synthetic: true,
+      batch: publishedRun?.metrics ?? null,
+      batchRecordedAt: publishedRun?.recordedAt ?? null,
     };
   }
 
@@ -320,7 +310,7 @@ export function createRequestListener(application: RecoveryApplication): (reques
       const caseId = caseIdFrom(detail);
       const recoveryCase = await store.get(caseId);
       if (!recoveryCase) return send(response, 404, JSON.stringify({ error: `Recovery Case not found: ${caseId}` }));
-      return send(response, 200, JSON.stringify(caseDetail(recoveryCase)));
+      return send(response, 200, JSON.stringify(caseDetail(recoveryCase, clock.now().toISOString())));
     }
     if (request.method === 'GET' && url.pathname === '/api/evaluation') {
       // The dashboard reloads without re-running the batch, so a refresh — or a restart —
@@ -331,15 +321,7 @@ export function createRequestListener(application: RecoveryApplication): (reques
     }
     if (request.method === 'POST' && url.pathname === '/api/evaluation') {
       const evaluation = await runEvaluation(generateEvaluationCases(60, 42));
-      const run: EvaluationRun = {
-        seed: evaluation.metrics.seed,
-        datasetVersion: evaluation.metrics.datasetVersion,
-        policyVersion: evaluation.metrics.policyVersion,
-        startedAt: evaluation.metrics.startedAt,
-        recordedAt: clock.now().toISOString(),
-        metrics: evaluation.metrics,
-        results: evaluation.results.map(({ recoveryCase, ...summary }) => ({ ...summary, status: recoveryCase.status })),
-      };
+      const run = toEvaluationRun(evaluation, clock.now().toISOString());
       await evaluationRuns.saveRun(run);
       // The batch already drove real Recovery Cases, so the dashboard shows those rather than
       // re-running a second, differently-shaped loop for display.

@@ -3,7 +3,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createRecoveryApplication } from '../src/application.js';
 import { createRequestListener, type CaseDetail, type CaseSummary } from '../src/http.js';
-import { FixedClock } from '../src/provider.js';
+import { DeterministicSimulator, FixedClock } from '../src/provider.js';
 import { InMemoryRecoveryStore } from '../src/recovery.js';
 
 const config = { port: 0, logLevel: 'info' as const };
@@ -224,6 +224,15 @@ describe('case drill-down', () => {
     expect(typeof detail.audit[0]?.actor).toBe('string');
   });
 
+  it('previews no fallback message while the case is still on the retry rung', async () => {
+    await post(failedRenewal());
+
+    const detail = await fetch(`${origin}/api/cases/case-1`).then((response) => response.json()) as CaseDetail;
+
+    expect(detail.actions.map((action) => action.kind)).toEqual(['retry']);
+    expect(detail.fallbackMessage).toBeNull();
+  });
+
   it('reports a case that does not exist', async () => {
     const response = await fetch(`${origin}/api/cases/case-nope`);
 
@@ -295,6 +304,27 @@ describe('evaluation projection', () => {
   });
 });
 
+describe('live and published figures', () => {
+  it('keeps reporting live cases after a batch is published, and reports the batch beside them', async () => {
+    await post(failedRenewal());
+    const beforeBatch = await fetch(`${origin}/api/metrics`).then((response) => response.json()) as Record<string, unknown>;
+    expect(beforeBatch).toMatchObject({ totalCases: 1, revenueAtRisk: 1200, batch: null });
+
+    await fetch(`${origin}/api/evaluation`, { method: 'POST' });
+
+    const afterBatch = await fetch(`${origin}/api/metrics`).then((response) => response.json()) as { totalCases: number; batch: { seed: number; totalCases: number } | null };
+    // The batch drove 60 more cases through the loop, so the live projection grows with them —
+    // a published batch reports beside the live figures rather than replacing them for good.
+    expect(afterBatch.totalCases).toBe(61);
+    expect(afterBatch.batch).toMatchObject({ seed: 42, totalCases: 60, synthetic: true });
+
+    // A case ingested after the batch still moves the live figures.
+    await post({ id: 'event-9', type: 'payment.failed', caseId: 'case-9', occurredAt: '2026-01-01T00:09:00.000Z', context, payload: { payment: { entity: { method: 'card' } } } });
+
+    expect(await fetch(`${origin}/api/metrics`).then((response) => response.json())).toMatchObject({ totalCases: 62 });
+  });
+});
+
 describe('dashboard demo path', () => {
   it('walks failure, diagnosis, policy, operator verdict, and audit through the projections the dashboard reads', async () => {
     await post(failedRenewal());
@@ -344,4 +374,40 @@ describe('dashboard demo path', () => {
       expect(html).toContain(fragment);
     }
   });
+});
+
+describe('fallback message preview', () => {
+  let linkServer: Server;
+  let linkOrigin: string;
+
+  beforeEach(async () => {
+    // The retry is unsupported for this case, so policy steps the case down to the link rung.
+    const provider = new DeterministicSimulator(new Map([['case-1', { retry: 'unsupported', fallback: 'success', diagnosis: 'transient' }]]), new FixedClock('2026-01-01T00:00:00.000Z'));
+    const application = createRecoveryApplication({ config, clock: new FixedClock('2026-01-01T00:00:00.000Z'), store: new InMemoryRecoveryStore(), provider });
+    linkServer = createServer(createRequestListener(application));
+    await new Promise<void>((resolve) => linkServer.listen(0, '127.0.0.1', resolve));
+    linkOrigin = `http://127.0.0.1:${(linkServer.address() as AddressInfo).port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((resolve, reject) => linkServer.close((error) => (error ? reject(error) : resolve())));
+  });
+
+  async function openCase(): Promise<void> {
+    const raw = JSON.stringify(failedRenewal());
+    await fetch(`${linkOrigin}/webhooks/razorpay`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-razorpay-signature': `sim:${raw}` }, body: raw });
+  }
+
+  it('previews the fallback message once a link exists, and marks it undeliverable', async () => {
+    await openCase();
+
+    const detail = await fetch(`${linkOrigin}/api/cases/case-1`).then((response) => response.json()) as CaseDetail;
+
+    expect(detail.actions.map((action) => action.kind)).toEqual(['fallback_link']);
+    // The MVP previews the customer message; it integrates no email, SMS, WhatsApp, or voice.
+    expect(detail.fallbackMessage).toMatchObject({ customerId: 'customer-1', expired: false, deliverable: false });
+    expect(detail.fallbackMessage?.body).toContain('INR 12.00');
+    expect(detail.fallbackMessage?.linkReference).toBe('sim_link_case-1');
+  });
+
 });

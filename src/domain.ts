@@ -246,6 +246,17 @@ export function updateAction(
   };
 }
 
+/**
+ * The fallback link the case is resting on, if any, and whether the customer can still pay it.
+ * One rule, shared: policy blocks further action while a link is `live`, the workflow retires one
+ * that has lapsed, and the customer message preview offers only a link this calls live. Letting
+ * each of them decide separately is how a customer gets asked to pay a link that is not payable.
+ */
+export function fallbackLinkState(recoveryCase: RecoveryCase, now: string): { readonly action: RecoveryAction; readonly live: boolean } | undefined {
+  const action = recoveryCase.actions.find((candidate) => candidate.kind === 'fallback_link' && candidate.status !== 'failed' && candidate.expiresAt !== undefined);
+  return action === undefined ? undefined : { action, live: Date.parse(action.expiresAt ?? '') > Date.parse(now) };
+}
+
 export function markRecovered(recoveryCase: RecoveryCase, now: string): RecoveryCase {
   if (!canTransition(recoveryCase.status, 'recovered')) throw new InvalidCaseTransitionError(recoveryCase.status, 'recovered');
   return { ...recoveryCase, status: 'recovered', outcome: 'recovered', recoveredAmount: recoveryCase.context.amount, updatedAt: now };

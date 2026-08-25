@@ -46,6 +46,6 @@ export function createRecoveryApplication(options: RecoveryApplicationOptions): 
     })));
   const workflow = new RecoveryWorkflow(store, provider, diagnosisEngine, new DeterministicPolicy(), clock);
   // Published batch figures live wherever the cases live, so a restart shows the same numbers.
-  const evaluationRuns = options.evaluationRuns ?? postgresStore ?? new InMemoryEvaluationRunStore();
+  const evaluationRuns = options.evaluationRuns ?? postgresStore?.evaluationRuns ?? new InMemoryEvaluationRunStore();
   return { config: options.config, clock, store, provider, diagnosisEngine, workflow, evaluationRuns, ...(postgresStore === undefined ? {} : { postgresStore }) };
 }

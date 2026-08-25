@@ -4,7 +4,7 @@ import { createPostgresStore } from '../src/persistence.js';
 import { DeterministicPolicy, RecoveryWorkflow, InMemoryRecoveryStore } from '../src/recovery.js';
 import { DeterministicSimulator, FixedClock } from '../src/provider.js';
 import { FixtureDiagnosisEngine } from '../src/diagnosis.js';
-import { generateEvaluationCases, runEvaluation, type EvaluationRun } from '../src/evaluation.js';
+import { generateEvaluationCases, runEvaluation, toEvaluationRun } from '../src/evaluation.js';
 import type { RecoveryCase } from '../src/domain.js';
 
 const connectionString = process.env.TEST_DATABASE_URL;
@@ -96,27 +96,18 @@ suite('PostgresRecoveryStore', () => {
   });
 
   it('publishes an evaluation run and replays the most recent one', async () => {
-    const report = await runEvaluation(generateEvaluationCases(50, 42));
-    const run: EvaluationRun = {
-      seed: report.metrics.seed,
-      datasetVersion: report.metrics.datasetVersion,
-      policyVersion: report.metrics.policyVersion,
-      startedAt: report.metrics.startedAt,
-      recordedAt: '2026-01-01T00:00:00.000Z',
-      metrics: report.metrics,
-      results: report.results.map(({ recoveryCase, ...summary }) => ({ ...summary, status: recoveryCase.status })),
-    };
+    const run = toEvaluationRun(await runEvaluation(generateEvaluationCases(50, 42)), '2026-01-01T00:00:00.000Z');
 
-    await store!.saveRun(run);
-    await store!.saveRun({ ...run, seed: 7, recordedAt: '2026-01-02T00:00:00.000Z' });
+    await store!.evaluationRuns.saveRun(run);
+    await store!.evaluationRuns.saveRun({ ...run, metrics: { ...run.metrics, seed: 7 }, recordedAt: '2026-01-02T00:00:00.000Z' });
 
-    const latest = await store!.latestRun();
-    expect(latest?.seed).toBe(7);
-    expect(latest?.metrics).toEqual(run.metrics);
+    const latest = await store!.evaluationRuns.latestRun();
+    expect(latest?.metrics).toEqual({ ...run.metrics, seed: 7 });
+    expect(latest?.recordedAt).toBe('2026-01-02T00:00:00.000Z');
     expect(latest?.results).toHaveLength(50);
   });
 
   it('reports no run before a batch has been published', async () => {
-    expect(await store!.latestRun()).toBeUndefined();
+    expect(await store!.evaluationRuns.latestRun()).toBeUndefined();
   });
 });

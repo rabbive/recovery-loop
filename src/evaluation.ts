@@ -314,13 +314,19 @@ export interface EvaluationRunCaseResult extends Omit<EvaluationCaseResult, 'rec
 }
 
 export interface EvaluationRun {
-  readonly seed: number;
-  readonly datasetVersion: string;
-  readonly policyVersion: string;
-  readonly startedAt: string;
+  /** When the batch was published. The seed, versions, and start are `metrics`' own record. */
   readonly recordedAt: string;
   readonly metrics: EvaluationMetrics;
   readonly results: readonly EvaluationRunCaseResult[];
+}
+
+/** Projects a finished report into the run that gets published, stored, and replayed. */
+export function toEvaluationRun(report: EvaluationReport, recordedAt: string): EvaluationRun {
+  return {
+    recordedAt,
+    metrics: report.metrics,
+    results: report.results.map(({ recoveryCase, ...summary }) => ({ ...summary, status: recoveryCase.status })),
+  };
 }
 
 /**

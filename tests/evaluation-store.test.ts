@@ -5,21 +5,12 @@ import { createRecoveryApplication } from '../src/application.js';
 import { createRequestListener } from '../src/http.js';
 import { FixedClock } from '../src/provider.js';
 import { InMemoryRecoveryStore } from '../src/recovery.js';
-import { InMemoryEvaluationRunStore, generateEvaluationCases, runEvaluation, type EvaluationRun } from '../src/evaluation.js';
+import { InMemoryEvaluationRunStore, generateEvaluationCases, runEvaluation, toEvaluationRun, type EvaluationRun } from '../src/evaluation.js';
 
 const config = { port: 0, logLevel: 'info' as const };
 
 async function run(seed: number): Promise<EvaluationRun> {
-  const report = await runEvaluation(generateEvaluationCases(50, seed));
-  return {
-    seed: report.metrics.seed,
-    datasetVersion: report.metrics.datasetVersion,
-    policyVersion: report.metrics.policyVersion,
-    startedAt: report.metrics.startedAt,
-    recordedAt: '2026-01-01T00:00:00.000Z',
-    metrics: report.metrics,
-    results: report.results.map(({ recoveryCase, ...summary }) => ({ ...summary, status: recoveryCase.status })),
-  };
+  return toEvaluationRun(await runEvaluation(generateEvaluationCases(50, seed)), '2026-01-01T00:00:00.000Z');
 }
 
 describe('evaluation run store', () => {
@@ -34,7 +25,7 @@ describe('evaluation run store', () => {
 
     const latest = await store.latestRun();
 
-    expect(latest?.seed).toBe(7);
+    expect(latest?.metrics.seed).toBe(7);
     expect(latest?.results).toHaveLength(50);
   });
 });

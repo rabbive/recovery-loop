@@ -29,10 +29,22 @@ export interface Policy {
   decide(recoveryCase: RecoveryCase, diagnosis: Diagnosis, now: string): PolicyDecision;
 }
 
-/** A fallback link the customer can still pay through, so no further action may be authorized. */
-function liveFallbackLink(recoveryCase: RecoveryCase, now: string): RecoveryAction | undefined {
-  return recoveryCase.actions.find((action) =>
-    action.kind === 'fallback_link' && action.status !== 'failed' && action.expiresAt !== undefined && Date.parse(action.expiresAt) > Date.parse(now));
+/**
+ * The payment method the provider reported, defaulting to `card`. Retry eligibility turns on
+ * this: only an authorized recurring mandate can be collected again without the customer.
+ */
+function eventPaymentMethod(event: ProviderEvent): PaymentAttempt['method'] {
+  const method = event.payload.method;
+  return method === 'recurring_mandate' || method === 'upi' || method === 'card' ? method : 'card';
+}
+
+/**
+ * The fallback link the case is resting on, if any, and whether the customer can still pay it.
+ * Policy blocks further action while one is `live`; the workflow retires one that has `lapsed`.
+ */
+function fallbackLinkState(recoveryCase: RecoveryCase, now: string): { readonly action: RecoveryAction; readonly live: boolean } | undefined {
+  const action = recoveryCase.actions.find((candidate) => candidate.kind === 'fallback_link' && candidate.status !== 'failed' && candidate.expiresAt !== undefined);
+  return action === undefined ? undefined : { action, live: Date.parse(action.expiresAt ?? '') > Date.parse(now) };
 }
 
 export class DeterministicPolicy implements Policy {
@@ -51,10 +63,10 @@ export class DeterministicPolicy implements Policy {
     // Integrity of the money-bearing facts comes before any judgement about the failure itself.
     if (recoveryCase.recoveredAmount > 0) return reject('stop', 'The renewal is already recovered');
     const violation = renewalContextViolation(recoveryCase.context);
-    if (violation) return reject('escalate', `Renewal context is not intact: ${violation}`);
+    if (violation) return reject('escalate', violation);
     if (!recoveryCase.attempts.some((attempt) => attempt.status === 'failed')) return reject('escalate', 'No failed payment attempt is recorded for this renewal');
-    const live = liveFallbackLink(recoveryCase, now);
-    if (live) return reject('escalate', `A fallback link is still live until ${live.expiresAt}`);
+    const fallbackLink = fallbackLinkState(recoveryCase, now);
+    if (fallbackLink?.live) return reject('escalate', `A fallback link is still live until ${fallbackLink.action.expiresAt}`);
     if (diagnosis.confidence < this.minimumConfidence) return reject('escalate', 'Diagnosis confidence is below policy threshold');
     if (diagnosis.failureCategory === 'hard_decline' || diagnosis.failureCategory === 'cancelled' || diagnosis.failureCategory === 'dispute') {
       return reject('escalate', `Failure category ${diagnosis.failureCategory} is not safe to automate`);
@@ -138,27 +150,89 @@ export class RecoveryWorkflow {
       updated = current.status === 'recovered'
         ? ignore('The renewal was already recovered')
         : caused && canTransition(current.status, 'recovered')
-          ? markRecovered(updated, event.occurredAt)
-          // Recovered revenue must be caused by a recovery action, so this is evidence, not a win.
-          : appendAudit(updated, { type: 'pre_existing_success', actor: 'provider', at: event.receivedAt, explanation: 'Success was not caused by a recovery action', data: { eventId: event.id } });
+          ? this.recover(updated, event.occurredAt)
+          // The renewal is paid but no recovery action caused it, so it is not recovered revenue.
+          // The loop must still stand down: retrying a paid renewal would collect it twice.
+          : this.standDown(updated, event);
     } else if (isTerminal(current.status)) {
       // Anything else arriving after an outcome is history: record it, never re-open the case.
       updated = ignore('A terminal case cannot change state after this provider signal');
-    } else if (event.type === 'payment_failed' && current.attempts.length === 0) {
-      const attempt: PaymentAttempt = {
-        id: `${current.id}:attempt:1`,
-        providerPaymentId: event.providerPaymentId ?? `${current.id}:payment`,
-        method: event.payload.method === 'recurring_mandate' ? 'recurring_mandate' : 'card',
-        status: 'failed',
-        ...(typeof event.payload.failureCode === 'string' ? { failureCode: event.payload.failureCode } : {}),
-        occurredAt: event.occurredAt,
-      };
-      updated = addAttempt(updated, attempt);
+    } else if (event.type === 'payment_failed') {
+      const outstandingRetry = current.actions.find((action) => action.kind === 'retry' && (action.status === 'submitted' || action.status === 'pending'));
+      updated = current.attempts.length === 0
+        ? addAttempt(updated, {
+          id: `${current.id}:attempt:1`,
+          providerPaymentId: event.providerPaymentId ?? `${current.id}:payment`,
+          method: eventPaymentMethod(event),
+          status: 'failed',
+          ...(typeof event.payload.failureCode === 'string' ? { failureCode: event.payload.failureCode } : {}),
+          occurredAt: event.occurredAt,
+        })
+        : outstandingRetry
+          // The provider only accepted the retry earlier; this failure is its real outcome.
+          ? this.recordRetryFailure(updated, outstandingRetry, event)
+          : ignore('The renewal already has a recorded failed attempt and no outstanding action');
     } else if (event.type === 'subscription_cancelled' || event.type === 'dispute_opened') {
-      updated = withStatus(updated, 'escalated', event.receivedAt, 'escalated');
+      updated = this.escalateCase(updated, `Provider reported ${event.type}`, event.receivedAt);
     }
     await this.store.save(updated);
     return updated;
+  }
+
+  /** Reaching an outcome is itself auditable, so every terminal transition goes through here. */
+  private settle(recoveryCase: RecoveryCase, status: 'recovered' | 'escalated' | 'exhausted' | 'stopped', at: string, explanation: string, data: Record<string, unknown> = {}): RecoveryCase {
+    return appendAudit(withStatus(recoveryCase, status, at, status), { type: `case_${status}`, actor: 'system', at, explanation, data });
+  }
+
+  private recover(recoveryCase: RecoveryCase, at: string): RecoveryCase {
+    const recovered = markRecovered(recoveryCase, at);
+    return appendAudit(recovered, { type: 'case_recovered', actor: 'system', at, explanation: 'A recovery action collected the renewal', data: { recoveredAmount: recovered.recoveredAmount } });
+  }
+
+  private escalateCase(recoveryCase: RecoveryCase, explanation: string, at: string): RecoveryCase {
+    return this.settle(recoveryCase, 'escalated', at, explanation);
+  }
+
+  /** Retires the loop for a renewal that was paid without any recovery action causing it. */
+  private standDown(recoveryCase: RecoveryCase, event: ProviderEvent): RecoveryCase {
+    const noted = appendAudit(recoveryCase, { type: 'pre_existing_success', actor: 'provider', at: event.receivedAt, explanation: 'Success was not caused by a recovery action, so it is not recovered revenue', data: { eventId: event.id } });
+    return this.settle(noted, 'stopped', event.receivedAt, 'The renewal was paid outside the recovery loop, so no action may be authorized');
+  }
+
+  private recordRetryFailure(recoveryCase: RecoveryCase, retry: RecoveryAction, event: ProviderEvent): RecoveryCase {
+    const failed = updateAction(recoveryCase, retry.idempotencyKey, { status: 'failed', result: `Provider reported the retry failed: ${event.id}` }, event.receivedAt);
+    const audited = appendAudit(failed, { type: 'retry_failed', actor: 'provider', at: event.receivedAt, explanation: 'The authorized retry did not collect the renewal', data: { eventId: event.id, action: retry.kind } });
+    return this.stepDownToFallback(audited, event.receivedAt);
+  }
+
+  /**
+   * Records the workflow's own recommendation after an unsuccessful retry. It is written as a
+   * Diagnosis so policy still authorizes the next rung — ADR-0001 keeps policy the only
+   * authorizer — but `modelVersion` marks it as workflow-authored rather than model output.
+   */
+  private stepDownToFallback(recoveryCase: RecoveryCase, at: string): RecoveryCase {
+    const recommendation: Diagnosis = {
+      failureCategory: 'transient', confidence: 1, evidence: ['retry_failed'], recommendedAction: 'fallback_link',
+      explanation: 'Retry did not recover the renewal; offer an expiring fallback link.', modelVersion: 'workflow-v1',
+    };
+    return withDiagnosis(recoveryCase, recommendation, at);
+  }
+
+  /**
+   * Carries a case to its next resting point: diagnose if it has no recommendation yet, ask
+   * policy, then execute whatever policy authorized. Callers drive the loop with this rather
+   * than sequencing the three steps themselves.
+   */
+  async drive(caseId: string): Promise<RecoveryCase> {
+    const current = await this.requireCase(caseId);
+    if (isTerminal(current.status)) return current;
+    // A case resting on a submitted retry or a live link is waiting on the outside world, not on
+    // us. Re-authorizing there would ask policy for a rung the case has already spent.
+    const waiting = current.status === 'retry_scheduled' || current.status === 'fallback_link_available';
+    if (waiting && !current.actions.some((action) => action.status === 'pending')) return current;
+    if (!current.diagnosis) await this.runDiagnosis(caseId);
+    await this.authorize(caseId);
+    return this.executePending(caseId);
   }
 
   async runDiagnosis(caseId: string): Promise<RecoveryCase> {
@@ -178,7 +252,7 @@ export class RecoveryWorkflow {
         failing = appendAudit(failing, { type: 'diagnosis_unavailable', actor: 'diagnosis_model', at: now, explanation: reason, data: { retryable, attempt } });
         if (!retryable || attempt === this.maxDiagnosisAttempts) {
           // Model failure must never authorize a money action: hand the case to a human.
-          const escalated = withStatus(failing, 'escalated', now, 'escalated');
+          const escalated = this.escalateCase(failing, reason, now);
           await this.store.save(escalated);
           return escalated;
         }
@@ -203,7 +277,7 @@ export class RecoveryWorkflow {
     let updated = addDecision(current, decision);
     updated = appendAudit(updated, { type: decision.allowed ? 'policy_allowed' : 'policy_blocked', actor: 'policy', at: now, explanation: decision.reason, data: { action: decision.action, policyVersion: decision.policyVersion } });
     if (!decision.allowed) {
-      updated = withStatus(updated, 'escalated', now, 'escalated');
+      updated = this.escalateCase(updated, decision.reason, now);
       await this.store.save(updated);
       return updated;
     }
@@ -219,7 +293,7 @@ export class RecoveryWorkflow {
         updated = addDecision(updated, steppedDown);
         updated = appendAudit(updated, { type: steppedDown.allowed ? 'policy_allowed' : 'policy_blocked', actor: 'policy', at: now, explanation: steppedDown.reason, data: { action: steppedDown.action, policyVersion: steppedDown.policyVersion } });
         if (!steppedDown.allowed) {
-          updated = withStatus(updated, 'escalated', now, 'escalated');
+          updated = this.escalateCase(updated, steppedDown.reason, now);
           await this.store.save(updated);
           return updated;
         }
@@ -229,7 +303,7 @@ export class RecoveryWorkflow {
     if (kind !== 'retry' && kind !== 'fallback_link') {
       // An allowed verdict that moves no money is an outcome, not a pending provider operation.
       const status = kind === 'stop' ? 'stopped' : 'escalated';
-      updated = withStatus(updated, status, now, status);
+      updated = this.settle(updated, status, now, decision.reason);
       await this.store.save(updated);
       return updated;
     }
@@ -271,9 +345,8 @@ export class RecoveryWorkflow {
     updated = appendAudit(updated, { type: 'provider_action_result', actor: 'provider', at: now, explanation: result.message, data: { action: action.kind, status: result.status, idempotencyKey: action.idempotencyKey } });
     if (result.status === 'failed') {
       if (action.kind === 'retry') {
-        const fallbackDiagnosis: Diagnosis = { failureCategory: 'transient', confidence: 1, evidence: ['retry_failed'], recommendedAction: 'fallback_link', explanation: 'Retry did not recover the renewal; offer an expiring fallback link.', modelVersion: 'workflow-v1' };
-        updated = withDiagnosis(updated, fallbackDiagnosis, now);
-      } else if (action.kind === 'fallback_link') updated = withStatus(updated, 'exhausted', now, 'exhausted');
+        updated = this.stepDownToFallback(updated, now);
+      } else if (action.kind === 'fallback_link') updated = this.settle(updated, 'exhausted', now, 'The fallback link could not be created');
     }
     await this.store.save(updated);
     return updated;
@@ -283,7 +356,7 @@ export class RecoveryWorkflow {
    * Retires a fallback link the customer never paid. Nothing else closes the loop for a case
    * resting in `fallback_link_available`, so without this the renewal stays open forever.
    */
-  async expireLapsedActions(caseId: string): Promise<RecoveryCase> {
+  async expireLapsedFallbackLink(caseId: string): Promise<RecoveryCase> {
     const current = await this.requireCase(caseId);
     if (isTerminal(current.status)) return current;
     const now = this.clock.now().toISOString();
@@ -292,7 +365,7 @@ export class RecoveryWorkflow {
     if (!lapsed) return current;
     let updated = updateAction(current, lapsed.idempotencyKey, { status: 'failed', result: 'Fallback link expired before the renewal was paid' }, now);
     updated = appendAudit(updated, { type: 'fallback_link_expired', actor: 'system', at: now, explanation: 'The fallback link expired before the renewal was paid', data: { action: lapsed.kind, expiresAt: lapsed.expiresAt } });
-    updated = withStatus(updated, 'exhausted', now, 'exhausted');
+    updated = this.settle(updated, 'exhausted', now, 'The fallback link expired before the renewal was paid');
     await this.store.save(updated);
     return updated;
   }
@@ -306,13 +379,13 @@ export class RecoveryWorkflow {
   }
 
   /** Applies an operator's verdict, or records that the case had already reached an outcome. */
-  private async manualOutcome(caseId: string, status: 'stopped' | 'escalated', auditType: string, reason: string): Promise<RecoveryCase> {
+  private async manualOutcome(caseId: string, status: 'stopped' | 'escalated', auditType: 'manual_stop' | 'manual_escalation', reason: string): Promise<RecoveryCase> {
     const current = await this.requireCase(caseId);
     const now = this.clock.now().toISOString();
     // An outcome already reached is not the operator's to overwrite, but the attempt is auditable.
     const updated = isTerminal(current.status)
       ? appendAudit(current, { type: 'manual_action_ignored', actor: 'operator', at: now, explanation: `Case already reached ${current.status}; ${reason} was not applied`, data: { requested: status, status: current.status } })
-      : appendAudit(withStatus(current, status, now, status), { type: auditType, actor: 'operator', at: now, explanation: reason, data: {} });
+      : this.settle(appendAudit(current, { type: auditType, actor: 'operator', at: now, explanation: reason, data: {} }), status, now, reason);
     await this.store.save(updated);
     return updated;
   }

@@ -63,8 +63,9 @@ describe('webhook boundary', () => {
     expect(await store.all()).toHaveLength(0);
   });
 
-  it('treats a redelivered event as one logical event and adds no second attempt', async () => {
-    await post(failedRenewal());
+  it('treats a redelivered event as one logical event and adds no second attempt or action', async () => {
+    const first = await post(failedRenewal());
+    expect(await first.json()).toMatchObject({ status: 'retry_scheduled' });
 
     const repeat = await post(failedRenewal());
 
@@ -73,7 +74,15 @@ describe('webhook boundary', () => {
     const recoveryCase = await store.get('case-1');
     expect(recoveryCase?.events).toHaveLength(1);
     expect(recoveryCase?.attempts).toHaveLength(1);
-    expect(recoveryCase?.actions).toHaveLength(0);
+    expect(recoveryCase?.actions).toHaveLength(1);
+  });
+
+  it('takes the retry rung for a Razorpay-shaped body that carries a recurring mandate', async () => {
+    await post(failedRenewal());
+
+    const recoveryCase = await store.get('case-1');
+    expect(recoveryCase?.attempts[0]?.method).toBe('recurring_mandate');
+    expect(recoveryCase?.actions.map((action) => action.kind)).toEqual(['retry']);
   });
 
   it('rejects malformed JSON', async () => {
@@ -130,12 +139,14 @@ describe('webhook boundary', () => {
   it('records an unsupported event type without acting on the case', async () => {
     await post(failedRenewal());
 
+    const before = await store.get('case-1');
+
     const response = await post({ id: 'event-3', type: 'payout.processed', caseId: 'case-1', occurredAt: '2026-01-01T00:00:06.000Z' });
 
     expect(response.status).toBe(202);
     const recoveryCase = await store.get('case-1');
-    expect(recoveryCase?.status).toBe('at_risk');
-    expect(recoveryCase?.actions).toHaveLength(0);
+    expect(recoveryCase?.status).toBe(before?.status);
+    expect(recoveryCase?.actions).toHaveLength(before?.actions.length ?? 0);
     expect(recoveryCase?.events.map((event) => event.type)).toEqual(['payment_failed', 'unknown']);
   });
 
@@ -145,7 +156,7 @@ describe('webhook boundary', () => {
     const [dashboard, cases, metrics] = await Promise.all([fetch(origin), fetch(`${origin}/api/cases`), fetch(`${origin}/api/metrics`)]);
 
     expect(dashboard.headers.get('content-type')).toContain('text/html');
-    expect(await cases.json()).toMatchObject([{ id: 'case-1', status: 'at_risk', amount: 1200 }]);
+    expect(await cases.json()).toMatchObject([{ id: 'case-1', status: 'retry_scheduled', amount: 1200 }]);
     expect(await metrics.json()).toMatchObject({ totalCases: 1, revenueAtRisk: 1200, recoveredAmount: 0 });
   });
 
@@ -185,6 +196,6 @@ describe('operator surface', () => {
     // Nothing has been offered a link yet, so the sweep exhausts nothing.
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ expired: [] });
-    expect((await store.get('case-1'))?.status).toBe('at_risk');
+    expect((await store.get('case-1'))?.status).toBe('retry_scheduled');
   });
 });

@@ -67,8 +67,17 @@ export function webhookInput(payload: Record<string, unknown>, fallbackId?: stri
         : rawType === 'subscription.cancelled' || rawType === 'subscription_cancelled' ? 'subscription_cancelled'
           : rawType === 'dispute.created' || rawType === 'dispute_opened' ? 'dispute_opened' : 'unknown';
   if (!caseId || !id) return undefined;
-  const providerPaymentId = stringValue(payload.providerPaymentId);
-  return { id, type, caseId, ...(providerPaymentId === undefined ? {} : { providerPaymentId }), occurredAt, payload };
+  const providerPaymentId = stringValue(payload.providerPaymentId) ?? stringValue(entity.id);
+  // Razorpay nests the method and failure code on the payment entity, but the domain reads them
+  // off the event payload. Lift them here so a real body can still take the retry rung.
+  const method = stringValue(payload.method) ?? stringValue(entity.method);
+  const failureCode = stringValue(payload.failureCode) ?? stringValue(entity.error_code) ?? stringValue(entity.error_reason);
+  return {
+    id, type, caseId,
+    ...(providerPaymentId === undefined ? {} : { providerPaymentId }),
+    occurredAt,
+    payload: { ...payload, ...(method === undefined ? {} : { method }), ...(failureCode === undefined ? {} : { failureCode }) },
+  };
 }
 
 /**
@@ -103,6 +112,14 @@ export function createRequestListener(application: RecoveryApplication): (reques
       exhausted: cases.filter((recoveryCase) => recoveryCase.status === 'exhausted').length,
       synthetic: true,
     };
+  }
+
+  /** Opens a synthetic case and drives it, so the dashboard shows the same loop a webhook drives. */
+  async function seedCase(caseId: string, renewal: Parameters<typeof workflow.openCase>[1]): Promise<void> {
+    const at = clock.now().toISOString();
+    await workflow.openCase(caseId, renewal);
+    await workflow.ingestEvent(provider.normalizeEvent({ id: `${caseId}:failed`, type: 'payment_failed', caseId, occurredAt: at, payload: { method: 'recurring_mandate' } }, at));
+    await workflow.drive(caseId);
   }
 
   async function webhook(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -140,7 +157,9 @@ export function createRequestListener(application: RecoveryApplication): (reques
           customerId: String(renewal.customerId), subscriptionId: String(renewal.subscriptionId), orderId: String(renewal.orderId), amount: renewal.amount, currency: String(renewal.currency), dueAt: String(renewal.dueAt),
         });
       }
-      const result = await workflow.ingestEvent(event);
+      const ingested = await workflow.ingestEvent(event);
+      // Ingestion is the contract with the provider; driving the loop is what makes it recover.
+      const result = duplicate ? ingested : await workflow.drive(event.caseId);
       return send(response, duplicate ? 200 : 202, JSON.stringify({ accepted: true, duplicate, caseId: result.id, status: result.status }));
     } catch (error) {
       return send(response, 422, JSON.stringify({ error: String(error) }));
@@ -163,7 +182,7 @@ export function createRequestListener(application: RecoveryApplication): (reques
     }
     if (request.method === 'POST' && url.pathname === '/api/expire') {
       // Nothing else retires a lapsed fallback link, so the sweep is the loop's closing step.
-      const swept = await Promise.all((await store.all()).map((recoveryCase) => workflow.expireLapsedActions(recoveryCase.id)));
+      const swept = await Promise.all((await store.all()).map((recoveryCase) => workflow.expireLapsedFallbackLink(recoveryCase.id)));
       return send(response, 200, JSON.stringify({ expired: swept.filter((recoveryCase) => recoveryCase.status === 'exhausted').map((recoveryCase) => recoveryCase.id) }));
     }
     if (request.method === 'GET' && url.pathname === '/') return send(response, 200, dashboard(), 'text/html');
@@ -175,13 +194,7 @@ export function createRequestListener(application: RecoveryApplication): (reques
       const evaluation = await runEvaluation(generateEvaluationCases(60, 42));
       latestEvaluation = evaluation;
       for (const evaluationCase of evaluation.cases) {
-        if (!(await store.get(evaluationCase.id))) {
-          await workflow.openCase(evaluationCase.id, evaluationCase.context);
-          await workflow.ingestEvent(provider.normalizeEvent({ id: `${evaluationCase.id}:failed`, type: 'payment_failed', caseId: evaluationCase.id, occurredAt: clock.now().toISOString(), payload: { method: 'recurring_mandate' } }, clock.now().toISOString()));
-          await workflow.runDiagnosis(evaluationCase.id);
-          await workflow.authorize(evaluationCase.id);
-          await workflow.executePending(evaluationCase.id);
-        }
+        if (!(await store.get(evaluationCase.id))) await seedCase(evaluationCase.id, evaluationCase.context);
       }
       return send(response, 200, JSON.stringify(evaluation));
     }

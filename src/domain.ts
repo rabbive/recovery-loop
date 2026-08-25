@@ -106,9 +106,10 @@ export interface RecoveryCase {
 export const terminalStatuses = new Set<CaseStatus>(['recovered', 'escalated', 'exhausted', 'stopped']);
 
 const allowedTransitions: Readonly<Record<CaseStatus, readonly CaseStatus[]>> = {
-  // A renewal can be paid at any point in the loop — a late provider settlement, or the customer
-  // paying through another channel — so every non-terminal status can still reach recovered.
-  at_risk: ['at_risk', 'diagnosed', 'recovered', 'escalated', 'stopped'],
+  // A recovery action can settle late, so any status that could have authorized one still
+  // reaches recovered. `at_risk` cannot: nothing was authorized there, and a renewal paid
+  // without a recovery action is stood down as stopped rather than counted as recovered.
+  at_risk: ['at_risk', 'diagnosed', 'escalated', 'stopped'],
   diagnosed: ['diagnosed', 'retry_scheduled', 'fallback_link_available', 'recovered', 'escalated', 'stopped'],
   retry_scheduled: ['retry_scheduled', 'diagnosed', 'fallback_link_available', 'recovered', 'escalated', 'exhausted', 'stopped'],
   fallback_link_available: ['fallback_link_available', 'recovered', 'exhausted', 'escalated', 'stopped'],
@@ -141,16 +142,17 @@ export function canTransition(from: CaseStatus, to: CaseStatus): boolean {
  * before authorizing anything that moves money.
  */
 export function renewalContextViolation(context: RenewalContext): string | undefined {
-  if (!context.customerId || !context.subscriptionId || !context.orderId) return 'customer, subscription, and order identifiers are required';
-  if (!Number.isSafeInteger(context.amount) || context.amount <= 0) return 'amount must be a positive safe integer in minor currency units';
-  if (!/^[A-Z]{3}$/.test(context.currency)) return 'currency must be an uppercase ISO 4217 code';
-  if (Number.isNaN(Date.parse(context.dueAt))) return 'dueAt must be a valid timestamp';
+  const intact = 'Renewal context is not intact';
+  if (!context.customerId || !context.subscriptionId || !context.orderId) return `${intact}: customer, subscription, and order identifiers are required`;
+  if (!Number.isSafeInteger(context.amount) || context.amount <= 0) return `${intact}: amount must be a positive safe integer in minor currency units`;
+  if (!/^[A-Z]{3}$/.test(context.currency)) return `${intact}: currency must be an uppercase ISO 4217 code`;
+  if (Number.isNaN(Date.parse(context.dueAt))) return `${intact}: dueAt must be a valid timestamp`;
   return undefined;
 }
 
 function validateRenewalContext(context: RenewalContext): RenewalContext {
   const violation = renewalContextViolation(context);
-  if (violation) throw new Error(`Renewal context is not intact: ${violation}`);
+  if (violation) throw new Error(violation);
   return Object.freeze({ ...context });
 }
 

@@ -103,9 +103,9 @@ describe('recovery orchestration', () => {
     await advance(workflow, true);
     await advance(workflow);
 
-    expect((await workflow.expireLapsedActions('case-1')).status).toBe('fallback_link_available');
+    expect((await workflow.expireLapsedFallbackLink('case-1')).status).toBe('fallback_link_available');
     clock.advance(24 * 60 * 60 * 1000);
-    const expired = await workflow.expireLapsedActions('case-1');
+    const expired = await workflow.expireLapsedFallbackLink('case-1');
 
     expect(expired.status).toBe('exhausted');
     expect(expired.actions.find((action) => action.kind === 'fallback_link')?.status).toBe('failed');
@@ -118,7 +118,7 @@ describe('recovery orchestration', () => {
     await advance(workflow, true);
     await advance(workflow);
     clock.advance(24 * 60 * 60 * 1000);
-    await workflow.expireLapsedActions('case-1');
+    await workflow.expireLapsedFallbackLink('case-1');
 
     const recovered = await workflow.ingestEvent(provider.normalizeEvent({ id: 'event-9', type: 'payment_succeeded', caseId: 'case-1', occurredAt: '2026-01-02T00:00:01.000Z' }, '2026-01-02T00:00:02.000Z'));
 
@@ -178,6 +178,7 @@ describe('recovery orchestration', () => {
       'policy_allowed',
       'provider_action_result',
       'provider_event_received',
+      'case_recovered',
     ]);
     expect(recovered.audit.map((entry) => entry.id)).toEqual(recovered.audit.map((_entry, index) => `case-1:audit:${index + 1}`));
     expect(recovered.decisions).toHaveLength(1);

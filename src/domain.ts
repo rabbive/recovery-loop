@@ -81,6 +81,11 @@ export interface RecoveryAction {
  * Every kind of entry the timeline can hold. It is a union rather than a string because the
  * counters and projections that read the timeline match these spellings: with a free-form string,
  * renaming an emitter would silently zero a published figure and still typecheck.
+ *
+ * These strings are persisted — in `audit_events.type` and inside the `recovery_cases.state`
+ * document, which hydrates back through an unvalidated cast. Renaming one is therefore a data
+ * migration, not a type edit: rows written under the old spelling keep it, hydrate as an entry
+ * this union says cannot exist, and read as zero wherever a counter matches on the new name.
  */
 export type AuditEventType =
   | 'case_opened'

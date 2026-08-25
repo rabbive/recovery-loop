@@ -107,7 +107,9 @@ describe('evaluation run', () => {
       expect(result.fallbackActions).toBeLessThanOrEqual(1);
       expect(result.providerOperations).toBeLessThanOrEqual(result.retryActions + result.fallbackActions);
       expect(result.auditEvents).toBe(recoveryCase.audit.length);
-      expect(result.unsafeActionsPrevented).toBe(recoveryCase.audit.filter((event) => event.type === 'policy_blocked').length);
+      const blocked = recoveryCase.audit.filter((event) => event.type === 'policy_blocked');
+      const ineligible = recoveryCase.audit.filter((event) => event.type === 'retry_ineligible');
+      expect(result.unsafeActionsPrevented + result.recommendationsRefused).toBe(blocked.length + ineligible.length);
       expect(recoveryCase.audit.some((event) => event.type === 'case_opened')).toBe(true);
       if (result.recoveredAmount > 0) expect(recoveryCase.audit.some((event) => event.type === 'case_recovered')).toBe(true);
     }
@@ -146,6 +148,8 @@ describe('evaluation run', () => {
   it('reports prevented unsafe and duplicate actions', async () => {
     const { metrics, results } = await runSeededBatch();
     expect(metrics.unsafeActionsPrevented).toBe(results.reduce((sum, result) => sum + result.unsafeActionsPrevented, 0));
+    expect(metrics.recommendationsRefused).toBe(results.reduce((sum, result) => sum + result.recommendationsRefused, 0));
+    expect(metrics.recommendationsRefused).toBeGreaterThan(0);
     expect(metrics.duplicateActionsPrevented).toBe(results.reduce((sum, result) => sum + result.duplicateActionsPrevented, 0));
     expect(metrics.duplicateEventsIgnored).toBe(results.reduce((sum, result) => sum + result.duplicateEventsIgnored, 0));
     expect(metrics.lateEventsIgnored).toBe(results.reduce((sum, result) => sum + result.lateEventsIgnored, 0));
@@ -153,8 +157,9 @@ describe('evaluation run', () => {
     expect(metrics.duplicateActionsPrevented).toBeGreaterThan(0);
     expect(metrics.duplicateEventsIgnored).toBeGreaterThan(0);
     expect(metrics.lateEventsIgnored).toBeGreaterThan(0);
-    // Every case that policy refused must hold no money action at all.
-    for (const result of results.filter((candidate) => candidate.unsafeActionsPrevented > 0)) {
+    // A case whose every recommendation policy refused must hold no money action at all. A case
+    // that was merely refused one rung — an ineligible retry — may still take the next one.
+    for (const result of results.filter((candidate) => candidate.recommendationsRefused > 0)) {
       expect(result.retryActions + result.fallbackActions).toBe(0);
     }
     // A case that never spent a rung cannot have prevented a duplicate: re-driving it is a no-op,
@@ -164,6 +169,27 @@ describe('evaluation run', () => {
     }
     for (const result of results.filter((candidate) => candidate.duplicateActionsPrevented > 0)) {
       expect(result.retryActions + result.fallbackActions).toBeGreaterThan(0);
+    }
+  });
+
+  it('counts only refused money actions as unsafe actions prevented', async () => {
+    const { results } = await runSeededBatch();
+
+    // A diagnosis that recommends escalation proposes no money action, so policy refusing it
+    // prevented nothing unsafe — it agreed. Counting those inflates the safety claim.
+    for (const result of results) {
+      const blocked = result.recoveryCase.audit.filter((event) => event.type === 'policy_blocked');
+      const blockedMoneyActions = blocked.filter((event) => event.data.action === 'retry' || event.data.action === 'fallback_link');
+      const ineligibleRetries = result.recoveryCase.audit.filter((event) => event.type === 'retry_ineligible');
+      expect(result.unsafeActionsPrevented).toBe(blockedMoneyActions.length + ineligibleRetries.length);
+      expect(result.recommendationsRefused).toBe(blocked.length - blockedMoneyActions.length);
+    }
+    // The hard-decline archetype is refused, but its own diagnosis asked to escalate.
+    const hardDecline = results.filter((result) => result.archetype === 'hard_decline_escalated');
+    expect(hardDecline.length).toBeGreaterThan(0);
+    for (const result of hardDecline) {
+      expect(result.unsafeActionsPrevented).toBe(0);
+      expect(result.recommendationsRefused).toBeGreaterThan(0);
     }
   });
 
@@ -231,7 +257,8 @@ describe('evaluation run', () => {
       stoppedCases: 4,
       openCases: 0,
       diagnosedCases: 48,
-      unsafeActionsPrevented: 8,
+      unsafeActionsPrevented: 4,
+      recommendationsRefused: 8,
       duplicateActionsPrevented: 17,
       duplicateEventsIgnored: 45,
       lateEventsIgnored: 10,

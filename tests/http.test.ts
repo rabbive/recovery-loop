@@ -160,6 +160,17 @@ describe('webhook boundary', () => {
     expect(await metrics.json()).toMatchObject({ totalCases: 1, revenueAtRisk: 1200, recoveredAmount: 0 });
   });
 
+  it('stops counting a case as revenue at risk once it reaches a terminal outcome', async () => {
+    // CONTEXT.md: Revenue at Risk "is not counted after the case reaches a terminal outcome."
+    // An escalated renewal is a human's problem now, not an open recovery opportunity.
+    await post(failedRenewal());
+    expect(await fetch(`${origin}/api/metrics`).then((response) => response.json())).toMatchObject({ revenueAtRisk: 1200 });
+
+    await fetch(`${origin}/api/cases/case-1/escalate`, { method: 'POST' });
+
+    expect(await fetch(`${origin}/api/metrics`).then((response) => response.json())).toMatchObject({ revenueAtRisk: 0, escalated: 1 });
+  });
+
   it('answers an unknown route with 404', async () => {
     expect((await fetch(`${origin}/nope`)).status).toBe(404);
   });

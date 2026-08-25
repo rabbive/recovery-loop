@@ -56,8 +56,21 @@ create table if not exists policy_decisions (
   reason text not null,
   policy_version text not null,
   decided_at timestamptz not null,
-  primary key (case_id, policy_version, decided_at)
+  -- `authorize` can refuse one rung and step down to the next in the same instant, so the action
+  -- is part of a decision's identity. Without it the second decision replaces the first and the
+  -- record of why the loop chose the fallback link is lost.
+  primary key (case_id, action, policy_version, decided_at)
 );
+
+-- Existing deployments were keyed without the action and silently dropped stepped-down decisions.
+do $$
+begin
+  if not exists (select 1 from pg_constraint where conname = 'policy_decisions_action_pkey') then
+    alter table policy_decisions drop constraint if exists policy_decisions_pkey;
+    alter table policy_decisions add constraint policy_decisions_action_pkey primary key (case_id, action, policy_version, decided_at);
+  end if;
+end
+$$;
 
 create table if not exists recovery_actions (
   id text primary key,

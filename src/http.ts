@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { RecoveryApplication } from './application.js';
 import type { NormalizedEventInput } from './provider.js';
-import { caseStatuses, terminalStatuses, type CaseStatus, type RecoveryCase } from './domain.js';
+import { caseStatuses, isTerminal, terminalStatuses, type CaseStatus, type RecoveryCase } from './domain.js';
 import { fallbackRecoveryMessage } from './messaging.js';
 import { generateEvaluationCases, runEvaluation, toEvaluationRun } from './evaluation.js';
 
@@ -221,7 +221,9 @@ export function createRequestListener(application: RecoveryApplication): (reques
     const publishedRun = await evaluationRuns.latestRun();
     return {
       totalCases: cases.length,
-      revenueAtRisk: cases.reduce((sum, recoveryCase) => sum + (recoveryCase.status === 'recovered' ? 0 : recoveryCase.context.amount), 0),
+      // Revenue at Risk is the value of renewals still in play: a case that reached any terminal
+      // outcome — recovered, escalated, exhausted, stopped — is resolved and stops counting.
+      revenueAtRisk: cases.reduce((sum, recoveryCase) => sum + (isTerminal(recoveryCase.status) ? 0 : recoveryCase.context.amount), 0),
       recoveredAmount: cases.reduce((sum, recoveryCase) => sum + recoveryCase.recoveredAmount, 0),
       recoveryRate: cases.length === 0 ? 0 : cases.filter((recoveryCase) => recoveryCase.status === 'recovered').length / cases.length,
       escalated: cases.filter((recoveryCase) => recoveryCase.status === 'escalated').length,

@@ -58,6 +58,19 @@ suite('PostgresRecoveryStore', () => {
     expect(loaded?.diagnosis?.failureCategory).toBe('transient');
   });
 
+  it('keeps every policy decision the case recorded, including two decided in the same instant', async () => {
+    // `authorize` can refuse a rung and step down to the next one, so a case carries two
+    // decisions stamped at the same time. The queryable projection has to hold both, or the
+    // record of why the loop chose the fallback link disappears.
+    const driven = await drivenCase();
+    expect(driven.decisions.length).toBeGreaterThan(1);
+    expect(new Set(driven.decisions.map((decision) => decision.decidedAt)).size).toBeLessThan(driven.decisions.length);
+
+    await store!.save(driven);
+
+    expect(await rowCount('policy_decisions', 'case-1')).toBe(driven.decisions.length);
+  });
+
   it('reports a case it has never stored', async () => {
     expect(await store!.get('case-nope')).toBeUndefined();
   });

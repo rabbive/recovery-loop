@@ -106,8 +106,11 @@ export interface RecoveryCase {
 export const terminalStatuses = new Set<CaseStatus>(['recovered', 'escalated', 'exhausted', 'stopped']);
 
 const allowedTransitions: Readonly<Record<CaseStatus, readonly CaseStatus[]>> = {
+  // A recovery action can settle late, so any status that could have authorized one still
+  // reaches recovered. `at_risk` cannot: nothing was authorized there, and a renewal paid
+  // without a recovery action is stood down as stopped rather than counted as recovered.
   at_risk: ['at_risk', 'diagnosed', 'escalated', 'stopped'],
-  diagnosed: ['diagnosed', 'retry_scheduled', 'fallback_link_available', 'escalated', 'stopped'],
+  diagnosed: ['diagnosed', 'retry_scheduled', 'fallback_link_available', 'recovered', 'escalated', 'stopped'],
   retry_scheduled: ['retry_scheduled', 'diagnosed', 'fallback_link_available', 'recovered', 'escalated', 'exhausted', 'stopped'],
   fallback_link_available: ['fallback_link_available', 'recovered', 'exhausted', 'escalated', 'stopped'],
   recovered: ['recovered'],
@@ -133,11 +136,23 @@ export function canTransition(from: CaseStatus, to: CaseStatus): boolean {
   return allowedTransitions[from].includes(to);
 }
 
+/**
+ * Describes why a renewal context cannot be trusted, or undefined when it is intact. A case
+ * rehydrated from storage never passed through `createRecoveryCase`, so policy re-checks this
+ * before authorizing anything that moves money.
+ */
+export function renewalContextViolation(context: RenewalContext): string | undefined {
+  const intact = 'Renewal context is not intact';
+  if (!context.customerId || !context.subscriptionId || !context.orderId) return `${intact}: customer, subscription, and order identifiers are required`;
+  if (!Number.isSafeInteger(context.amount) || context.amount <= 0) return `${intact}: amount must be a positive safe integer in minor currency units`;
+  if (!/^[A-Z]{3}$/.test(context.currency)) return `${intact}: currency must be an uppercase ISO 4217 code`;
+  if (Number.isNaN(Date.parse(context.dueAt))) return `${intact}: dueAt must be a valid timestamp`;
+  return undefined;
+}
+
 function validateRenewalContext(context: RenewalContext): RenewalContext {
-  if (!context.customerId || !context.subscriptionId || !context.orderId) throw new Error('Renewal context requires customer, subscription, and order identifiers');
-  if (!Number.isSafeInteger(context.amount) || context.amount <= 0) throw new Error('Renewal amount must be a positive safe integer in minor currency units');
-  if (!/^[A-Z]{3}$/.test(context.currency)) throw new Error('Renewal currency must be an uppercase ISO 4217 code');
-  if (Number.isNaN(Date.parse(context.dueAt))) throw new Error('Renewal dueAt must be a valid timestamp');
+  const violation = renewalContextViolation(context);
+  if (violation) throw new Error(violation);
   return Object.freeze({ ...context });
 }
 

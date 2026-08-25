@@ -210,6 +210,37 @@ describe('evaluation run', () => {
     expect(metrics.openCases).toBe(0);
   });
 
+  /**
+   * The published demo figures. They are quoted in the README, the PR, and the pitch, so a
+   * behaviour change that moves them must fail here rather than silently invalidate what was
+   * published. Update these numbers deliberately, together with whatever quotes them.
+   */
+  it('publishes the documented seed-42 headline figures', async () => {
+    const { metrics } = await runSeededBatch(60, 42);
+    expect(metrics).toMatchObject({
+      totalCases: 60,
+      failedRenewalValue: 313_818_200,
+      recoveredAmount: 145_615_400,
+      unrecoveredAmount: 168_202_800,
+      recoveredCases: 28,
+      retryRecoveredCases: 15,
+      fallbackRecoveredCases: 9,
+      unattributedRecoveredCases: 4,
+      escalatedCases: 16,
+      exhaustedCases: 12,
+      stoppedCases: 4,
+      openCases: 0,
+      diagnosedCases: 48,
+      unsafeActionsPrevented: 8,
+      duplicateActionsPrevented: 17,
+      duplicateEventsIgnored: 45,
+      lateEventsIgnored: 10,
+      safeActionMismatches: 4,
+      expectationMismatches: 0,
+    });
+    expect(metrics.diagnosisAccuracy).toBeCloseTo(44 / 48, 12);
+  });
+
   it('runs on a controllable clock so link expiry is deterministic', async () => {
     const cases = generateEvaluationCases(60, SEED);
     const early = await runEvaluation(cases, { startedAt: '2026-01-01T00:00:00.000Z' });

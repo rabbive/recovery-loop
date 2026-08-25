@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { RecoveryApplication } from './application.js';
 import type { NormalizedEventInput } from './provider.js';
 import { caseStatuses, terminalStatuses, type CaseStatus, type RecoveryCase } from './domain.js';
-import { generateEvaluationCases, runEvaluation } from './evaluation.js';
+import { generateEvaluationCases, runEvaluation, type EvaluationRun } from './evaluation.js';
 
 function send(response: ServerResponse, status: number, body: string, contentType = 'application/json'): void {
   response.writeHead(status, { 'content-type': `${contentType}; charset=utf-8`, 'cache-control': 'no-store' });
@@ -203,20 +203,11 @@ export type CaseDetail = ReturnType<typeof caseDetail>;
  * orchestration runs, so an unsigned or unparseable delivery can never reach the workflow.
  */
 export function createRequestListener(application: RecoveryApplication): (request: IncomingMessage, response: ServerResponse) => void {
-  const { clock, provider, store, workflow } = application;
-  let latestEvaluation: Awaited<ReturnType<typeof runEvaluation>> | undefined;
-
-  /** One shape for a batch, whether it was just run or is being replayed on a reload. */
-  function evaluationProjection(evaluation: NonNullable<typeof latestEvaluation>) {
-    return {
-      available: true,
-      metrics: evaluation.metrics,
-      results: evaluation.results.map(({ recoveryCase, ...summary }) => ({ ...summary, status: recoveryCase.status })),
-    };
-  }
+  const { clock, evaluationRuns, provider, store, workflow } = application;
 
   async function metrics() {
     const cases = await store.all();
+    const latestEvaluation = await evaluationRuns.latestRun();
     // A completed batch is the honest headline: its totals reconcile to individual case outcomes.
     // `revenueAtRisk` keeps the same meaning as the live projection below — renewal value the loop
     // did not collect — so the dashboard number does not change definition once a batch has run.
@@ -332,18 +323,28 @@ export function createRequestListener(application: RecoveryApplication): (reques
       return send(response, 200, JSON.stringify(caseDetail(recoveryCase)));
     }
     if (request.method === 'GET' && url.pathname === '/api/evaluation') {
-      // The dashboard reloads without re-running the batch, so a refresh cannot change the
-      // published figures. Only POST runs one.
-      if (!latestEvaluation) return send(response, 200, JSON.stringify({ available: false }));
-      return send(response, 200, JSON.stringify(evaluationProjection(latestEvaluation)));
+      // The dashboard reloads without re-running the batch, so a refresh — or a restart —
+      // cannot change the published figures. Only POST runs one.
+      const latestRun = await evaluationRuns.latestRun();
+      if (!latestRun) return send(response, 200, JSON.stringify({ available: false }));
+      return send(response, 200, JSON.stringify({ available: true, ...latestRun }));
     }
     if (request.method === 'POST' && url.pathname === '/api/evaluation') {
       const evaluation = await runEvaluation(generateEvaluationCases(60, 42));
-      latestEvaluation = evaluation;
+      const run: EvaluationRun = {
+        seed: evaluation.metrics.seed,
+        datasetVersion: evaluation.metrics.datasetVersion,
+        policyVersion: evaluation.metrics.policyVersion,
+        startedAt: evaluation.metrics.startedAt,
+        recordedAt: clock.now().toISOString(),
+        metrics: evaluation.metrics,
+        results: evaluation.results.map(({ recoveryCase, ...summary }) => ({ ...summary, status: recoveryCase.status })),
+      };
+      await evaluationRuns.saveRun(run);
       // The batch already drove real Recovery Cases, so the dashboard shows those rather than
       // re-running a second, differently-shaped loop for display.
       for (const result of evaluation.results) await store.save(result.recoveryCase);
-      return send(response, 200, JSON.stringify(evaluationProjection(evaluation)));
+      return send(response, 200, JSON.stringify({ available: true, ...run }));
     }
     send(response, 404, JSON.stringify({ error: 'Not found' }));
   }

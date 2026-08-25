@@ -87,3 +87,17 @@ create index if not exists diagnoses_case_id_idx on diagnoses(case_id);
 create index if not exists policy_decisions_case_id_idx on policy_decisions(case_id);
 create index if not exists recovery_actions_case_id_idx on recovery_actions(case_id);
 create index if not exists audit_events_case_id_at_idx on audit_events(case_id, at);
+
+-- Published evaluation runs. A merchant who was shown a figure keeps seeing it after a restart.
+create table if not exists evaluation_runs (
+  id bigserial primary key,
+  seed integer not null,
+  dataset_version text not null,
+  policy_version text not null,
+  started_at timestamptz not null,
+  recorded_at timestamptz not null,
+  metrics jsonb not null,
+  results jsonb not null
+);
+
+create index if not exists evaluation_runs_recorded_at_idx on evaluation_runs(recorded_at desc, id desc);

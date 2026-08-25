@@ -2,8 +2,9 @@ import { readFile } from 'node:fs/promises';
 import { Pool, type PoolConfig } from 'pg';
 import type { RecoveryCase } from './domain.js';
 import type { RecoveryStore } from './recovery.js';
+import type { EvaluationRun, EvaluationRunStore } from './evaluation.js';
 
-export class PostgresRecoveryStore implements RecoveryStore {
+export class PostgresRecoveryStore implements RecoveryStore, EvaluationRunStore {
   constructor(private readonly pool: Pool) {}
 
   async initialize(): Promise<void> {
@@ -84,6 +85,32 @@ export class PostgresRecoveryStore implements RecoveryStore {
     } finally {
       client.release();
     }
+  }
+
+  async saveRun(run: EvaluationRun): Promise<void> {
+    await this.pool.query(
+      `insert into evaluation_runs (seed, dataset_version, policy_version, started_at, recorded_at, metrics, results)
+       values ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)`,
+      [run.seed, run.datasetVersion, run.policyVersion, run.startedAt, run.recordedAt, JSON.stringify(run.metrics), JSON.stringify(run.results)],
+    );
+  }
+
+  /** The batch a merchant was shown most recently. Earlier runs stay on record, unpublished. */
+  async latestRun(): Promise<EvaluationRun | undefined> {
+    const result = await this.pool.query<{ seed: number; dataset_version: string; policy_version: string; started_at: Date; recorded_at: Date; metrics: EvaluationRun['metrics']; results: EvaluationRun['results'] }>(
+      'select seed, dataset_version, policy_version, started_at, recorded_at, metrics, results from evaluation_runs order by recorded_at desc, id desc limit 1',
+    );
+    const row = result.rows[0];
+    if (!row) return undefined;
+    return {
+      seed: row.seed,
+      datasetVersion: row.dataset_version,
+      policyVersion: row.policy_version,
+      startedAt: row.started_at.toISOString(),
+      recordedAt: row.recorded_at.toISOString(),
+      metrics: row.metrics,
+      results: row.results,
+    };
   }
 
   async all(): Promise<RecoveryCase[]> {

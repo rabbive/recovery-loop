@@ -1,5 +1,5 @@
 import { DiagnosisUnavailableError, type DiagnosisEngine } from './diagnosis.js';
-import type { Diagnosis, FailureCategory, ProviderEvent, RecoveryCase, RenewalContext } from './domain.js';
+import type { CaseStatus, Diagnosis, FailureCategory, ProviderEvent, RecoveryCase, RenewalContext } from './domain.js';
 import { DeterministicSimulator, FixedClock, type SimulatorScenario } from './provider.js';
 import { DeterministicPolicy, InMemoryRecoveryStore, POLICY_VERSION, RecoveryWorkflow } from './recovery.js';
 
@@ -306,6 +306,36 @@ export interface EvaluationMetrics {
   readonly safeActionMismatches: number;
   /** Cases whose observed outcome differed from ground truth. A trustworthy batch reports zero. */
   readonly expectationMismatches: number;
+}
+
+/** One published batch, as a merchant was shown it: ground truth, metrics, and per-case result. */
+export interface EvaluationRunCaseResult extends Omit<EvaluationCaseResult, 'recoveryCase'> {
+  readonly status: CaseStatus;
+}
+
+export interface EvaluationRun {
+  readonly seed: number;
+  readonly datasetVersion: string;
+  readonly policyVersion: string;
+  readonly startedAt: string;
+  readonly recordedAt: string;
+  readonly metrics: EvaluationMetrics;
+  readonly results: readonly EvaluationRunCaseResult[];
+}
+
+/**
+ * Published batches, latest first. A merchant who has seen a figure must keep seeing it, so a
+ * run outlives the process that produced it rather than living in one server's memory.
+ */
+export interface EvaluationRunStore {
+  saveRun(run: EvaluationRun): Promise<void>;
+  latestRun(): Promise<EvaluationRun | undefined>;
+}
+
+export class InMemoryEvaluationRunStore implements EvaluationRunStore {
+  private latest: EvaluationRun | undefined;
+  async saveRun(run: EvaluationRun): Promise<void> { this.latest = run; }
+  async latestRun(): Promise<EvaluationRun | undefined> { return this.latest; }
 }
 
 export interface EvaluationReport {

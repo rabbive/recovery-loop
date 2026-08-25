@@ -34,6 +34,29 @@ Runtime configuration is documented in `.env.example`. Set `DATABASE_URL` to ena
 
 Action identity is `RecoveryAction.idempotencyKey`. The simulator replays a recorded result for a repeated identity. The Razorpay adapter sends the key as the payment link's `reference_id`, so Razorpay itself rejects a duplicate; the adapter then resolves the existing link's real id through `GET /v1/payment_links?reference_id=...` and reports `idempotent: true`. Provider references are never synthesized — if the lookup fails, the result carries no reference and says so. Provider failures — outages, non-2xx responses, a created link with no id, missing credentials — map to a `failed` result rather than an exception.
 
+### Razorpay Test Mode adapter
+
+`RazorpayTestModeProvider` is the live integration behind that contract. It performs only operations Razorpay's public API documents:
+
+- **Recurring retry.** It reads the original payment (`GET /v1/payments/:id`), and charges again only when that payment carries `recurring: true` plus a token, customer, email, and contact. It then creates an order (`POST /v1/orders`) whose `receipt` is the action identity and charges the mandate (`POST /v1/payments/create/recurring`) for the case's own amount and currency. The response only means *submitted*; the webhook decides the outcome.
+- **Expiring fallback link.** `POST /v1/payment_links` with the action identity as `reference_id` and an `expire_by` 24 hours ahead of the injected clock.
+- **Idempotency.** Before creating an order the adapter looks the receipt up (`GET /v1/orders?receipt=...`) and, when that order already has a payment (`GET /v1/orders/:id/payments`), returns that payment id with `idempotent: true` instead of charging twice. An identity longer than Razorpay's 40-character limit is folded deterministically to a 31-character prefix plus a SHA-256 suffix. Razorpay does not itself enforce receipt uniqueness, so this is a lookup-then-create: it makes a re-driven action safe, not two genuinely concurrent submissions of the same identity. A retry is refused once any attempt on the case has succeeded, and targets the latest failed mandate attempt, so a renewal that is already paid is never charged again. Only a payment Razorpay reports as `authorized`, `captured`, or `refunded` counts as an existing charge: a `failed` or `created` payment on the order is not one, so the identity charges again rather than stalling on a decline.
+- **Error mapping.** Non-2xx responses, transport failures, a missing payment id, and missing credentials all map to a `failed` result carrying Razorpay's own description — never an exception, never a synthesized provider reference.
+- **Unsupported operations.** A case with no authorized recurring mandate fails with the reason instead of pretending an arbitrary card can be recharged.
+
+**Test Mode only.** Every money operation refuses to run unless `RAZORPAY_KEY_ID` starts with `rzp_test_`, so live keys cannot move real money through this MVP.
+
+#### Setup
+
+1. In the Razorpay Dashboard, switch to **Test Mode** and generate API keys under *Account & Settings → API Keys*.
+2. Export them at runtime — never commit them: `RAZORPAY_KEY_ID=rzp_test_...`, `RAZORPAY_KEY_SECRET=...`.
+3. Add a webhook pointing at `POST /webhooks/razorpay` for `payment.failed`, `payment.captured`, `payment.authorized`, `subscription.cancelled`, and `dispute.created`. Razorpay signs webhooks with the **webhook secret**, which is separate from the API key secret: set it as `RAZORPAY_WEBHOOK_SECRET`. Without it the adapter falls back to `RAZORPAY_KEY_SECRET`.
+4. Run the optional live checks: `RAZORPAY_KEY_ID=rzp_test_... RAZORPAY_KEY_SECRET=... npm test`. `tests/razorpay-integration.test.ts` is skipped unless a Test Mode key is present; it creates a real Test Mode payment link and proves the replay path.
+
+Charging a mandate end to end additionally requires a Test Mode customer with an authorized recurring token; without one the adapter reports the retry as unsupported rather than attempting it. The seeded evaluation never uses this adapter, so batch metrics stay reproducible.
+
+Both implementations decide retry eligibility through one exported rule, `chargeableMandateAttempt`, so the seam cannot drift: a case with a succeeded attempt is already paid and offers nothing to charge, and the target is the latest failed mandate attempt rather than the oldest. The shared contract suite covers that case against both providers, and asserts neither of them charges a case it reports as ineligible. The two differ on purpose in one place: the simulator resolves a retry terminally (`succeeded`/`failed`) so the seeded batch stays reproducible, while the adapter can only report `submitted` and lets the webhook decide.
+
 Retry eligibility comes from the provider, not from the recommendation. Policy may approve a retry, but `authorize` asks the provider first; when the payment has no authorized recurring mandate it records a `retry_ineligible` audit event and asks policy again for the fallback link, which needs no mandate. Every executed action carries its own recorded policy decision, and a rejection escalates the case. The Razorpay adapter never claims it can recharge an arbitrary card payment.
 
 ### AI diagnosis
@@ -46,7 +69,7 @@ An escalated or exhausted case can still transition to `recovered` if the custom
 
 ### Webhooks
 
-`POST /webhooks/razorpay` accepts a signed JSON event. The handler verifies `x-razorpay-signature`, uses `x-razorpay-event-id` when the payload has no event id, deduplicates event delivery, and opens a case from renewal context on the first failed event. In local simulator mode, sign the raw body as `sim:<raw-body>`; with Razorpay credentials configured, use the HMAC-SHA256 signature generated with `RAZORPAY_KEY_SECRET`.
+`POST /webhooks/razorpay` accepts a signed JSON event. The handler verifies `x-razorpay-signature`, uses `x-razorpay-event-id` when the payload has no event id, deduplicates event delivery, and opens a case from renewal context on the first failed event. In local simulator mode, sign the raw body as `sim:<raw-body>`; with Razorpay credentials configured, use the HMAC-SHA256 signature generated with `RAZORPAY_WEBHOOK_SECRET` (falling back to `RAZORPAY_KEY_SECRET` when no webhook secret is configured).
 
 ## Architecture
 
@@ -54,7 +77,7 @@ An escalated or exhausted case can still transition to `recovered` if the custom
 - `src/recovery.ts`: application workflow seam, deterministic policy, store, and idempotent action execution.
 - `src/diagnosis.ts`: diagnosis engine seam, structured-output validation, and the Anthropic Messages adapter.
 - `src/provider.ts`: the payment-provider contract, the deterministic simulator, and the Razorpay Test Mode adapter.
-- `src/evaluation.ts`: seeded 50+ case evaluation and reconciliation metrics.
+- `src/evaluation.ts`: the seeded 50+ case dataset, the batch runner, and reconciliation metrics.
 - `src/http.ts`: the HTTP boundary — webhook ingestion, operator verdicts, dashboard, and projections.
 - `src/server.ts`: process bootstrap that binds the HTTP boundary to a port.
 - `src/persistence.sql`: PostgreSQL persistence foundation for productionizing the in-memory store.
@@ -80,8 +103,16 @@ Actions are identified by `idempotencyKey` and stay `pending` until their result
 ## Synthetic evaluation
 
 ```bash
-node --input-type=module -e "import('./dist/src/evaluation.js').then(async ({runEvaluation}) => console.log(await runEvaluation()))"
+node --input-type=module -e "import('./dist/src/evaluation.js').then(async ({runEvaluation}) => console.log((await runEvaluation()).metrics))"
 ```
+
+`generateEvaluationCases(count, seed)` builds a seeded batch of 60 cases cycling 14 scenario archetypes: transient retry recovery, duplicate success delivery, delayed and contradictory events after settlement, retry failure into fallback recovery, a lapsed fallback link, an unavailable fallback link, a late success after both rungs were spent, hard decline, low confidence, unusable diagnosis output, an ineligible payment method that steps down a rung, a renewal paid outside the loop, a cancelled subscription, and a failure the provider mislabelled as temporary.
+
+Each case carries ground truth — the real failure category, the action that was safe given that truth, whether it should recover revenue, and the expected outcome — beside the case rather than inside it. The workflow reads only the scripted provider deliveries, and every provider operation goes through `RecoveryWorkflow`, so the batch measures the loop the product ships. `diagnosisAccuracy` scores whichever `DiagnosisEngine` the run is given (the default predicts from the provider failure code alone, and the mislabelled archetype is one it gets wrong on purpose). `safeActionMismatches` counts the cases where the loop spent a rung ground truth calls unsafe — it may only do so when a misleading provider signal misled the diagnosis, which is what the mislabelled archetype proves.
+
+`runEvaluation` gives every case its own store, simulator, and `FixedClock` seeded from `startedAt`, so link expiry and event ordering are deterministic and repeated runs of a seed publish identical totals. The report is `{ metrics, results }`. `metrics` is labelled `synthetic` and records the seed, dataset version, policy version, and diagnosis model version alongside failed renewal value, recovered and unrecovered amount, recovery rate, retry and fallback recovery, escalation, exhaustion, stopped cases, diagnosis accuracy, and the unsafe actions, duplicate actions, duplicate deliveries, and late deliveries prevented. `results` holds one row per case with its Recovery Case, so every published total reconciles to individual case outcomes and their audit trails — a renewal collected after both rungs failed is counted as recovered revenue but reported as `recovered_unattributed` rather than credited to an action that failed.
+
+`POST /api/evaluation` runs the same batch and persists the Recovery Cases it drove, so the dashboard shows the cases the metrics came from; its `revenueAtRisk` stays the renewal value the loop did not collect, matching the live projection.
 
 Synthetic results must not be presented as expected production performance. Razorpay credentials are optional and only used for a separately configured Test Mode integration.
 

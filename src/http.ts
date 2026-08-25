@@ -90,16 +90,27 @@ export function createRequestListener(application: RecoveryApplication): (reques
 
   async function metrics() {
     const cases = await store.all();
+    // A completed batch is the honest headline: its totals reconcile to individual case outcomes.
+    // `revenueAtRisk` keeps the same meaning as the live projection below — renewal value the loop
+    // did not collect — so the dashboard number does not change definition once a batch has run.
     if (latestEvaluation) {
+      const { metrics: batch } = latestEvaluation;
       return {
-        totalCases: latestEvaluation.totalCases,
-        revenueAtRisk: latestEvaluation.revenueAtRisk,
-        recoveredAmount: latestEvaluation.recoveredAmount,
-        recoveryRate: latestEvaluation.recoveryRate,
-        retryRecoveryRate: latestEvaluation.retryRecoveryRate,
-        fallbackRecoveryRate: latestEvaluation.fallbackRecoveryRate,
-        escalated: Math.round(latestEvaluation.escalationRate * latestEvaluation.totalCases),
-        exhausted: Math.round(latestEvaluation.exhaustedRate * latestEvaluation.totalCases),
+        totalCases: batch.totalCases,
+        revenueAtRisk: batch.unrecoveredAmount,
+        failedRenewalValue: batch.failedRenewalValue,
+        recoveredAmount: batch.recoveredAmount,
+        recoveryRate: batch.recoveryRate,
+        retryRecoveryRate: batch.retryRecoveryRate,
+        fallbackRecoveryRate: batch.fallbackRecoveryRate,
+        escalated: batch.escalatedCases,
+        exhausted: batch.exhaustedCases,
+        diagnosisAccuracy: batch.diagnosisAccuracy,
+        unsafeActionsPrevented: batch.unsafeActionsPrevented,
+        duplicateActionsPrevented: batch.duplicateActionsPrevented,
+        seed: batch.seed,
+        datasetVersion: batch.datasetVersion,
+        policyVersion: batch.policyVersion,
         synthetic: true,
       };
     }
@@ -112,14 +123,6 @@ export function createRequestListener(application: RecoveryApplication): (reques
       exhausted: cases.filter((recoveryCase) => recoveryCase.status === 'exhausted').length,
       synthetic: true,
     };
-  }
-
-  /** Opens a synthetic case and drives it, so the dashboard shows the same loop a webhook drives. */
-  async function seedCase(caseId: string, renewal: Parameters<typeof workflow.openCase>[1]): Promise<void> {
-    const at = clock.now().toISOString();
-    await workflow.openCase(caseId, renewal);
-    await workflow.ingestEvent(provider.normalizeEvent({ id: `${caseId}:failed`, type: 'payment_failed', caseId, occurredAt: at, payload: { method: 'recurring_mandate' } }, at));
-    await workflow.drive(caseId);
   }
 
   async function webhook(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -193,10 +196,13 @@ export function createRequestListener(application: RecoveryApplication): (reques
     if (request.method === 'POST' && url.pathname === '/api/evaluation') {
       const evaluation = await runEvaluation(generateEvaluationCases(60, 42));
       latestEvaluation = evaluation;
-      for (const evaluationCase of evaluation.cases) {
-        if (!(await store.get(evaluationCase.id))) await seedCase(evaluationCase.id, evaluationCase.context);
-      }
-      return send(response, 200, JSON.stringify(evaluation));
+      // The batch already drove real Recovery Cases, so the dashboard shows those rather than
+      // re-running a second, differently-shaped loop for display.
+      for (const result of evaluation.results) await store.save(result.recoveryCase);
+      return send(response, 200, JSON.stringify({
+        metrics: evaluation.metrics,
+        results: evaluation.results.map(({ recoveryCase, ...summary }) => ({ ...summary, status: recoveryCase.status })),
+      }));
     }
     send(response, 404, JSON.stringify({ error: 'Not found' }));
   }

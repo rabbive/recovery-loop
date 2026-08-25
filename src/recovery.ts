@@ -25,6 +25,9 @@ import { DiagnosisUnavailableError as DiagnosisFailure, type DiagnosisEngine as 
 
 export { AnthropicDiagnosisEngine, DiagnosisUnavailableError, FixtureDiagnosisEngine, type DiagnosisEngine } from './diagnosis.js';
 
+/** The version stamped on every policy decision. Reported with evaluation results so a batch is reproducible. */
+export const POLICY_VERSION = 'policy-v1';
+
 export interface Policy {
   decide(recoveryCase: RecoveryCase, diagnosis: Diagnosis, now: string): PolicyDecision;
 }
@@ -55,7 +58,7 @@ export class DeterministicPolicy implements Policy {
       action,
       allowed: false,
       reason,
-      policyVersion: 'policy-v1',
+      policyVersion: POLICY_VERSION,
       decidedAt: now,
     });
 
@@ -74,11 +77,11 @@ export class DeterministicPolicy implements Policy {
     if (diagnosis.failureCategory === 'unknown' || diagnosis.failureCategory === 'unsupported') return reject('escalate', 'Failure category is unsupported');
     if (diagnosis.recommendedAction === 'retry') {
       if (recoveryCase.actions.some((action) => action.kind === 'retry')) return reject('escalate', 'Retry limit has been reached');
-      return { action: 'retry', allowed: true, reason: 'Diagnosis recommends a bounded retry and policy checks passed', policyVersion: 'policy-v1', decidedAt: now };
+      return { action: 'retry', allowed: true, reason: 'Diagnosis recommends a bounded retry and policy checks passed', policyVersion: POLICY_VERSION, decidedAt: now };
     }
     if (diagnosis.recommendedAction === 'fallback_link') {
       if (recoveryCase.actions.some((action) => action.kind === 'fallback_link')) return reject('escalate', 'Fallback-link limit has been reached');
-      return { action: 'fallback_link', allowed: true, reason: 'Fallback link is the next bounded action', policyVersion: 'policy-v1', decidedAt: now };
+      return { action: 'fallback_link', allowed: true, reason: 'Fallback link is the next bounded action', policyVersion: POLICY_VERSION, decidedAt: now };
     }
     if (diagnosis.recommendedAction === 'stop') return reject('stop', 'Diagnosis requested stop; human confirmation is required');
     return reject('escalate', 'Diagnosis requested escalation');

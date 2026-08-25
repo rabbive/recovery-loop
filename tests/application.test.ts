@@ -1,8 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { createHmac } from 'node:crypto';
+import { describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '../src/config.js';
 import { createRecoveryApplication } from '../src/application.js';
 import { FixedClock } from '../src/provider.js';
 import { AnthropicDiagnosisEngine, FixtureDiagnosisEngine } from '../src/diagnosis.js';
+import { addAttempt, createRecoveryCase } from '../src/domain.js';
 
 const context = {
   customerId: 'customer-1', subscriptionId: 'subscription-1', orderId: 'order-1', amount: 1200, currency: 'INR', dueAt: '2026-01-01T00:00:00.000Z',
@@ -34,6 +36,22 @@ describe('application scaffold', () => {
     expect(config.anthropicApiKey).toBe('model-key');
     expect(config.anthropicModel).toBe('claude-opus-5');
     expect(createRecoveryApplication({ config }).diagnosisEngine).toBeInstanceOf(AnthropicDiagnosisEngine);
+  });
+
+  it('wires the Razorpay adapter with its webhook secret and the injected clock', async () => {
+    const config = loadConfig({ PORT: '3000', RAZORPAY_KEY_ID: 'rzp_test_key', RAZORPAY_KEY_SECRET: 'test_secret', RAZORPAY_WEBHOOK_SECRET: 'hook_secret' });
+    const application = createRecoveryApplication({ config, clock: new FixedClock('2026-01-01T00:00:00.000Z') });
+    const signed = createHmac('sha256', 'hook_secret').update('{"a":1}').digest('hex');
+    expect(application.provider.verifyEvent('{"a":1}', signed)).toBe(true);
+    // The adapter must never reach the network from a test, so the global fetch is stubbed here.
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ id: 'plink_wired' }), { status: 200 }));
+    const link = await application.provider.createFallbackLink(
+      addAttempt(createRecoveryCase('wired-case', context, '2026-01-01T00:00:00.000Z'), { id: 'a1', providerPaymentId: 'pay_1', method: 'recurring_mandate', status: 'failed', occurredAt: '2026-01-01T00:00:00.000Z' }),
+      { id: 'wired-case:action:1', kind: 'fallback_link', status: 'pending', idempotencyKey: 'wired-case:fallback_link', createdAt: '2026-01-01T00:00:00.000Z' },
+    );
+    expect(link.expiresAt).toBe('2026-01-02T00:00:00.000Z');
+    expect(link.providerReference).toBe('plink_wired');
+    fetchSpy.mockRestore();
   });
 
   it('rejects invalid ports and incomplete provider credentials', () => {

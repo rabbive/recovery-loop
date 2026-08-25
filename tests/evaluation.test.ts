@@ -108,8 +108,8 @@ describe('evaluation run', () => {
       expect(result.providerOperations).toBeLessThanOrEqual(result.retryActions + result.fallbackActions);
       expect(result.auditEvents).toBe(recoveryCase.audit.length);
       const blocked = recoveryCase.audit.filter((event) => event.type === 'policy_blocked');
-      const ineligible = recoveryCase.audit.filter((event) => event.type === 'retry_ineligible');
-      expect(result.unsafeActionsPrevented + result.recommendationsRefused).toBe(blocked.length + ineligible.length);
+      expect(result.unsafeActionsPrevented + result.recommendationsRefused).toBe(blocked.length);
+      expect(result.providerIneligibleRetries).toBe(recoveryCase.audit.filter((event) => event.type === 'retry_ineligible').length);
       expect(recoveryCase.audit.some((event) => event.type === 'case_opened')).toBe(true);
       if (result.recoveredAmount > 0) expect(recoveryCase.audit.some((event) => event.type === 'case_recovered')).toBe(true);
     }
@@ -150,10 +150,10 @@ describe('evaluation run', () => {
     expect(metrics.unsafeActionsPrevented).toBe(results.reduce((sum, result) => sum + result.unsafeActionsPrevented, 0));
     expect(metrics.recommendationsRefused).toBe(results.reduce((sum, result) => sum + result.recommendationsRefused, 0));
     expect(metrics.recommendationsRefused).toBeGreaterThan(0);
+    expect(metrics.providerIneligibleRetries).toBe(results.reduce((sum, result) => sum + result.providerIneligibleRetries, 0));
     expect(metrics.duplicateActionsPrevented).toBe(results.reduce((sum, result) => sum + result.duplicateActionsPrevented, 0));
     expect(metrics.duplicateEventsIgnored).toBe(results.reduce((sum, result) => sum + result.duplicateEventsIgnored, 0));
     expect(metrics.lateEventsIgnored).toBe(results.reduce((sum, result) => sum + result.lateEventsIgnored, 0));
-    expect(metrics.unsafeActionsPrevented).toBeGreaterThan(0);
     expect(metrics.duplicateActionsPrevented).toBeGreaterThan(0);
     expect(metrics.duplicateEventsIgnored).toBeGreaterThan(0);
     expect(metrics.lateEventsIgnored).toBeGreaterThan(0);
@@ -181,8 +181,15 @@ describe('evaluation run', () => {
       const blocked = result.recoveryCase.audit.filter((event) => event.type === 'policy_blocked');
       const blockedMoneyActions = blocked.filter((event) => event.data.action === 'retry' || event.data.action === 'fallback_link');
       const ineligibleRetries = result.recoveryCase.audit.filter((event) => event.type === 'retry_ineligible');
-      expect(result.unsafeActionsPrevented).toBe(blockedMoneyActions.length + ineligibleRetries.length);
+      expect(result.unsafeActionsPrevented).toBe(blockedMoneyActions.length);
       expect(result.recommendationsRefused).toBe(blocked.length - blockedMoneyActions.length);
+      expect(result.providerIneligibleRetries).toBe(ineligibleRetries.length);
+    }
+    // A retry the provider called ineligible is a capability miss, not a safety control: the loop
+    // steps down and the customer may still be charged through the fallback link. Counting it as
+    // an unsafe action prevented would claim a charge was stopped when money moved.
+    for (const result of results.filter((candidate) => candidate.providerIneligibleRetries > 0)) {
+      expect(result.fallbackActions).toBeGreaterThan(0);
     }
     // The hard-decline archetype is refused, but its own diagnosis asked to escalate.
     const hardDecline = results.filter((result) => result.archetype === 'hard_decline_escalated');
@@ -257,8 +264,9 @@ describe('evaluation run', () => {
       stoppedCases: 4,
       openCases: 0,
       diagnosedCases: 48,
-      unsafeActionsPrevented: 4,
+      unsafeActionsPrevented: 0,
       recommendationsRefused: 8,
+      providerIneligibleRetries: 4,
       duplicateActionsPrevented: 17,
       duplicateEventsIgnored: 45,
       lateEventsIgnored: 10,

@@ -257,10 +257,12 @@ export interface EvaluationCaseResult {
   readonly fallbackActions: number;
   /** Money operations the provider performed for this case. */
   readonly providerOperations: number;
-  /** Money actions the loop proposed but never performed, refused by policy or by the provider. */
+  /** Charges deterministic policy refused. */
   readonly unsafeActionsPrevented: number;
   /** Recommendations policy refused that proposed no money action, routing the case to a human. */
   readonly recommendationsRefused: number;
+  /** Retries the provider reported ineligible, after which the loop steps down a rung. */
+  readonly providerIneligibleRetries: number;
   /** Re-drives through the workflow that performed no second money operation. */
   readonly duplicateActionsPrevented: number;
   readonly duplicateEventsIgnored: number;
@@ -302,6 +304,7 @@ export interface EvaluationMetrics {
   readonly diagnosisAccuracy: number;
   readonly unsafeActionsPrevented: number;
   readonly recommendationsRefused: number;
+  readonly providerIneligibleRetries: number;
   readonly duplicateActionsPrevented: number;
   readonly duplicateEventsIgnored: number;
   readonly lateEventsIgnored: number;
@@ -555,14 +558,14 @@ async function runCase(evaluationCase: EvaluationCase, startedAt: string, engine
     retryActions: settled.actions.filter((action) => action.kind === 'retry').length,
     fallbackActions: settled.actions.filter((action) => action.kind === 'fallback_link').length,
     providerOperations: provider.calls.length,
-    // A money action the loop proposed and did not perform: policy refused the charge, or the
-    // provider reported no authorized mandate to charge. Policy blocking an escalate or stop
-    // recommendation prevented no charge — it agreed with a diagnosis that proposed none — so
-    // those are counted separately as refused recommendations rather than inflating this.
-    unsafeActionsPrevented: settled.audit.filter((event) =>
-      (event.type === 'policy_blocked' && (event.data.action === 'retry' || event.data.action === 'fallback_link'))
-      || event.type === 'retry_ineligible').length,
+    // A charge deterministic policy refused. Policy blocking an escalate or stop recommendation
+    // prevented no charge — it agreed with a diagnosis that proposed none — and a retry the
+    // provider called ineligible is a capability miss the loop steps down from, after which the
+    // customer may still be charged through the fallback link. Both are counted on their own
+    // rather than inflating a figure a reader takes as "the policy engine stopped a bad charge".
+    unsafeActionsPrevented: settled.audit.filter((event) => event.type === 'policy_blocked' && (event.data.action === 'retry' || event.data.action === 'fallback_link')).length,
     recommendationsRefused: settled.audit.filter((event) => event.type === 'policy_blocked' && event.data.action !== 'retry' && event.data.action !== 'fallback_link').length,
+    providerIneligibleRetries: settled.audit.filter((event) => event.type === 'retry_ineligible').length,
     duplicateActionsPrevented,
     duplicateEventsIgnored,
     lateEventsIgnored: settled.audit.filter((event) => event.type === 'late_event_ignored').length,
@@ -640,6 +643,7 @@ export async function runEvaluation(
       diagnosisAccuracy: rate(count((result) => result.diagnosisCorrect), diagnosedCases),
       unsafeActionsPrevented: sum((result) => result.unsafeActionsPrevented),
       recommendationsRefused: sum((result) => result.recommendationsRefused),
+      providerIneligibleRetries: sum((result) => result.providerIneligibleRetries),
       duplicateActionsPrevented: sum((result) => result.duplicateActionsPrevented),
       duplicateEventsIgnored: sum((result) => result.duplicateEventsIgnored),
       lateEventsIgnored: sum((result) => result.lateEventsIgnored),

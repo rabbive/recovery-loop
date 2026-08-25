@@ -48,7 +48,7 @@ function renderMetrics(m){
   const b=m.batch;
   const tiles=[['Revenue at risk',money(m.revenueAtRisk,'INR')],['Recovered',money(m.recoveredAmount,'INR')],['Recovery rate',(m.recoveryRate*100).toFixed(1)+'%'],['Cases',m.totalCases],['Escalated',m.escalated],['Exhausted',m.exhausted]];
   // The batch's own scoring is the only thing the live projection cannot know: ground truth.
-  if(b)tiles.push(['Batch first-attempt',(b.retryRecoveryRate*100).toFixed(1)+'%'],['Batch fallback',(b.fallbackRecoveryRate*100).toFixed(1)+'%'],['Batch unsafe prevented',b.unsafeActionsPrevented],['Batch duplicates prevented',b.duplicateActionsPrevented],['Batch diagnosis accuracy',(b.diagnosisAccuracy*100).toFixed(1)+'%']);
+  if(b)tiles.push(['Batch first-attempt',(b.retryRecoveryRate*100).toFixed(1)+'%'],['Batch fallback',(b.fallbackRecoveryRate*100).toFixed(1)+'%'],['Batch charges policy refused',b.unsafeActionsPrevented],['Batch recommendations refused',b.recommendationsRefused],['Batch ineligible retries',b.providerIneligibleRetries],['Batch duplicates prevented',b.duplicateActionsPrevented],['Batch diagnosis accuracy',(b.diagnosisAccuracy*100).toFixed(1)+'%']);
   document.querySelector('#cards').innerHTML=tiles.map(t=>'<div class="card"><div class="label">'+t[0]+'</div><div class="value">'+esc(t[1])+'</div></div>').join('');
   document.querySelector('#batch').textContent=b?'Live figures over all stored cases · seeded batch '+b.seed+' published '+m.batchRecordedAt+' (dataset '+b.datasetVersion+', policy '+b.policyVersion+') · every figure synthetic':'Live figures over all stored cases · no batch published yet · every figure synthetic';
 }

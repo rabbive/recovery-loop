@@ -56,6 +56,17 @@ export interface PaymentProvider {
 
 const FALLBACK_LINK_TTL_SECONDS = 24 * 60 * 60;
 
+/**
+ * The attempt a retry would charge again, or undefined when the case offers none. Both providers
+ * decide eligibility with this one rule, so the contract cannot drift between them: a case with a
+ * succeeded attempt is already paid and may not be charged, and the target is the latest failed
+ * mandate attempt rather than the oldest one on record.
+ */
+export function chargeableMandateAttempt(recoveryCase: RecoveryCase): PaymentAttempt | undefined {
+  if (recoveryCase.attempts.some((attempt) => attempt.status === 'succeeded')) return undefined;
+  return [...recoveryCase.attempts].reverse().find((attempt) => attempt.method === 'recurring_mandate' && attempt.status === 'failed' && Boolean(attempt.providerPaymentId));
+}
+
 export interface SimulatorScenario {
   readonly retry: 'success' | 'failure' | 'unsupported';
   readonly fallback: 'success' | 'failure';
@@ -92,9 +103,7 @@ export class DeterministicSimulator implements PaymentProvider {
   }
 
   async retryEligibility(recoveryCase: RecoveryCase): Promise<RetryEligibility> {
-    const attempt = recoveryCase.attempts[0];
-    if (attempt?.method !== 'recurring_mandate') return { eligible: false, reason: 'No authorized recurring mandate is available' };
-    if (attempt.status !== 'failed') return { eligible: false, reason: 'The original attempt is not failed' };
+    if (chargeableMandateAttempt(recoveryCase) === undefined) return { eligible: false, reason: 'No failed authorized recurring mandate is available to charge again' };
     const scenario = this.scenarios.get(recoveryCase.id);
     if (scenario?.retry === 'unsupported') return { eligible: false, reason: 'The provider does not support retry for this mandate' };
     return { eligible: true, reason: 'Authorized recurring mandate is eligible' };
@@ -197,7 +206,7 @@ export class RazorpayTestModeProvider implements PaymentProvider {
   }
 
   async retryEligibility(recoveryCase: RecoveryCase): Promise<RetryEligibility> {
-    return this.mandateAttempt(recoveryCase) === undefined
+    return chargeableMandateAttempt(recoveryCase) === undefined
       ? { eligible: false, reason: 'Only provider-supported recurring mandates may be retried' }
       : { eligible: true, reason: 'Recurring mandate supplied by provider' };
   }
@@ -211,7 +220,7 @@ export class RazorpayTestModeProvider implements PaymentProvider {
   async submitRetry(recoveryCase: RecoveryCase, action: RecoveryAction): Promise<ProviderResult> {
     const refusal = this.refusal();
     if (refusal) return { status: 'failed', message: refusal };
-    const attempt = this.mandateAttempt(recoveryCase);
+    const attempt = chargeableMandateAttempt(recoveryCase);
     // Razorpay's public API cannot recharge an arbitrary card payment; say so instead of pretending.
     if (attempt === undefined) return { status: 'failed', message: 'Retry is not supported for this payment: no authorized recurring mandate is on record' };
 
@@ -320,16 +329,6 @@ export class RazorpayTestModeProvider implements PaymentProvider {
   private async findLinkByReference(reference: string): Promise<string | undefined> {
     const response = await this.call('GET', '/v1/payment_links', undefined, { reference_id: reference });
     return response.ok ? this.firstId(response.payload.payment_links) : undefined;
-  }
-
-  /**
-   * The failed recurring attempt this case may charge again, if the provider supports one. A case
-   * that already has a succeeded attempt is paid, so nothing may be charged against it, and the
-   * target is the latest failed mandate attempt rather than the oldest one on record.
-   */
-  private mandateAttempt(recoveryCase: RecoveryCase): PaymentAttempt | undefined {
-    if (recoveryCase.attempts.some((attempt) => attempt.status === 'succeeded')) return undefined;
-    return [...recoveryCase.attempts].reverse().find((attempt) => attempt.method === 'recurring_mandate' && attempt.status === 'failed' && Boolean(attempt.providerPaymentId));
   }
 
   /** The mandate identity Razorpay needs to charge again, or undefined when the payment carries none. */

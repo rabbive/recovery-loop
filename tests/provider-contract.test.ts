@@ -25,6 +25,17 @@ function cardCase(id = 'card-1'): RecoveryCase {
   });
 }
 
+/** A case whose renewal was already collected: attempt 1 failed, then a later attempt succeeded. */
+function paidCase(id = 'case-1'): RecoveryCase {
+  return addAttempt(mandateCase(id), {
+    id: `${id}:attempt:2`,
+    providerPaymentId: 'pay_3',
+    method: 'recurring_mandate',
+    status: 'succeeded',
+    occurredAt: '2026-01-02T00:00:00.000Z',
+  });
+}
+
 function action(kind: RecoveryAction['kind'], caseId = 'case-1'): RecoveryAction {
   return { id: `${caseId}:action:${kind}:1`, kind, status: 'pending', idempotencyKey: `${caseId}:${kind}`, createdAt: '2026-01-01T00:00:00.000Z' };
 }
@@ -98,6 +109,13 @@ describe.each(implementations)('payment provider contract: $name', ({ make, sign
     const ineligible = await provider.retryEligibility(cardCase());
     expect(ineligible.eligible).toBe(false);
     expect(ineligible.reason.length).toBeGreaterThan(0);
+  });
+
+  it('refuses a retry once the renewal has already been collected', async () => {
+    const provider = make();
+    const eligibility = await provider.retryEligibility(paidCase());
+    expect(eligibility.eligible).toBe(false);
+    expect(eligibility.reason.length).toBeGreaterThan(0);
   });
 
   it('creates a fallback link that expires after the current time', async () => {

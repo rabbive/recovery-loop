@@ -55,6 +55,8 @@ Action identity is `RecoveryAction.idempotencyKey`. The simulator replays a reco
 
 Charging a mandate end to end additionally requires a Test Mode customer with an authorized recurring token; without one the adapter reports the retry as unsupported rather than attempting it. The seeded evaluation never uses this adapter, so batch metrics stay reproducible.
 
+Both implementations decide retry eligibility through one exported rule, `chargeableMandateAttempt`, so the seam cannot drift: a case with a succeeded attempt is already paid and offers nothing to charge, and the target is the latest failed mandate attempt rather than the oldest. The shared contract suite covers that case against both providers.
+
 Retry eligibility comes from the provider, not from the recommendation. Policy may approve a retry, but `authorize` asks the provider first; when the payment has no authorized recurring mandate it records a `retry_ineligible` audit event and asks policy again for the fallback link, which needs no mandate. Every executed action carries its own recorded policy decision, and a rejection escalates the case. The Razorpay adapter never claims it can recharge an arbitrary card payment.
 
 ### AI diagnosis

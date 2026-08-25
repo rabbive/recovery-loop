@@ -8,6 +8,7 @@ import {
   createRecoveryCase,
   isTerminal,
   markRecovered,
+  renewalContextViolation,
   updateAction,
   withDiagnosis,
   withStatus,
@@ -28,6 +29,12 @@ export interface Policy {
   decide(recoveryCase: RecoveryCase, diagnosis: Diagnosis, now: string): PolicyDecision;
 }
 
+/** A fallback link the customer can still pay through, so no further action may be authorized. */
+function liveFallbackLink(recoveryCase: RecoveryCase, now: string): RecoveryAction | undefined {
+  return recoveryCase.actions.find((action) =>
+    action.kind === 'fallback_link' && action.status !== 'failed' && action.expiresAt !== undefined && Date.parse(action.expiresAt) > Date.parse(now));
+}
+
 export class DeterministicPolicy implements Policy {
   constructor(private readonly minimumConfidence = 0.75) {}
 
@@ -41,6 +48,13 @@ export class DeterministicPolicy implements Policy {
     });
 
     if (isTerminal(recoveryCase.status)) return reject(diagnosis.recommendedAction, 'Case is terminal');
+    // Integrity of the money-bearing facts comes before any judgement about the failure itself.
+    if (recoveryCase.recoveredAmount > 0) return reject('stop', 'The renewal is already recovered');
+    const violation = renewalContextViolation(recoveryCase.context);
+    if (violation) return reject('escalate', `Renewal context is not intact: ${violation}`);
+    if (!recoveryCase.attempts.some((attempt) => attempt.status === 'failed')) return reject('escalate', 'No failed payment attempt is recorded for this renewal');
+    const live = liveFallbackLink(recoveryCase, now);
+    if (live) return reject('escalate', `A fallback link is still live until ${live.expiresAt}`);
     if (diagnosis.confidence < this.minimumConfidence) return reject('escalate', 'Diagnosis confidence is below policy threshold');
     if (diagnosis.failureCategory === 'hard_decline' || diagnosis.failureCategory === 'cancelled' || diagnosis.failureCategory === 'dispute') {
       return reject('escalate', `Failure category ${diagnosis.failureCategory} is not safe to automate`);
@@ -114,7 +128,23 @@ export class RecoveryWorkflow {
     let updated = addProviderEvent(current, event);
     if (updated === current) return current;
     updated = appendAudit(updated, { type: 'provider_event_received', actor: 'provider', at: event.receivedAt, explanation: `Received ${event.type}`, data: { eventId: event.id } });
-    if (event.type === 'payment_failed' && current.attempts.length === 0) {
+    const ignore = (explanation: string): RecoveryCase =>
+      appendAudit(updated, { type: 'late_event_ignored', actor: 'provider', at: event.receivedAt, explanation, data: { eventId: event.id, eventType: event.type, status: current.status } });
+
+    // Money settles independently of the loop, so a success is judged before any terminal guard:
+    // the case may have been escalated or exhausted while the payment was still in flight.
+    if (event.type === 'payment_succeeded') {
+      const caused = current.actions.some((action) => action.kind === 'retry' || action.kind === 'fallback_link');
+      updated = current.status === 'recovered'
+        ? ignore('The renewal was already recovered')
+        : caused && canTransition(current.status, 'recovered')
+          ? markRecovered(updated, event.occurredAt)
+          // Recovered revenue must be caused by a recovery action, so this is evidence, not a win.
+          : appendAudit(updated, { type: 'pre_existing_success', actor: 'provider', at: event.receivedAt, explanation: 'Success was not caused by a recovery action', data: { eventId: event.id } });
+    } else if (isTerminal(current.status)) {
+      // Anything else arriving after an outcome is history: record it, never re-open the case.
+      updated = ignore('A terminal case cannot change state after this provider signal');
+    } else if (event.type === 'payment_failed' && current.attempts.length === 0) {
       const attempt: PaymentAttempt = {
         id: `${current.id}:attempt:1`,
         providerPaymentId: event.providerPaymentId ?? `${current.id}:payment`,
@@ -124,16 +154,8 @@ export class RecoveryWorkflow {
         occurredAt: event.occurredAt,
       };
       updated = addAttempt(updated, attempt);
-    }
-    if (event.type === 'payment_succeeded' && canTransition(current.status, 'recovered')) {
-      const recoveryAction = current.actions.find((action) => action.kind === 'retry' || action.kind === 'fallback_link');
-      if (recoveryAction) updated = markRecovered(updated, event.occurredAt);
-      else updated = appendAudit(updated, { type: 'pre_existing_success', actor: 'provider', at: event.receivedAt, explanation: 'Success was not caused by a recovery action', data: { eventId: event.id } });
-    }
-    if (event.type === 'subscription_cancelled' || event.type === 'dispute_opened') {
-      updated = isTerminal(updated.status)
-        ? appendAudit(updated, { type: 'late_terminal_signal_ignored', actor: 'provider', at: event.receivedAt, explanation: 'A terminal case cannot change state after this provider signal', data: { eventId: event.id } })
-        : withStatus(updated, 'escalated', event.receivedAt, 'escalated');
+    } else if (event.type === 'subscription_cancelled' || event.type === 'dispute_opened') {
+      updated = withStatus(updated, 'escalated', event.receivedAt, 'escalated');
     }
     await this.store.save(updated);
     return updated;
@@ -257,20 +279,40 @@ export class RecoveryWorkflow {
     return updated;
   }
 
-  async stop(caseId: string, reason = 'Stopped by recovery operator'): Promise<RecoveryCase> {
+  /**
+   * Retires a fallback link the customer never paid. Nothing else closes the loop for a case
+   * resting in `fallback_link_available`, so without this the renewal stays open forever.
+   */
+  async expireLapsedActions(caseId: string): Promise<RecoveryCase> {
     const current = await this.requireCase(caseId);
+    if (isTerminal(current.status)) return current;
     const now = this.clock.now().toISOString();
-    let updated = withStatus(current, 'stopped', now, 'stopped');
-    updated = appendAudit(updated, { type: 'manual_stop', actor: 'operator', at: now, explanation: reason, data: {} });
+    const lapsed = current.actions.find((action) =>
+      action.kind === 'fallback_link' && action.status !== 'failed' && action.expiresAt !== undefined && Date.parse(action.expiresAt) <= Date.parse(now));
+    if (!lapsed) return current;
+    let updated = updateAction(current, lapsed.idempotencyKey, { status: 'failed', result: 'Fallback link expired before the renewal was paid' }, now);
+    updated = appendAudit(updated, { type: 'fallback_link_expired', actor: 'system', at: now, explanation: 'The fallback link expired before the renewal was paid', data: { action: lapsed.kind, expiresAt: lapsed.expiresAt } });
+    updated = withStatus(updated, 'exhausted', now, 'exhausted');
     await this.store.save(updated);
     return updated;
   }
 
+  async stop(caseId: string, reason = 'Stopped by recovery operator'): Promise<RecoveryCase> {
+    return this.manualOutcome(caseId, 'stopped', 'manual_stop', reason);
+  }
+
   async escalate(caseId: string, reason = 'Escalated by recovery operator'): Promise<RecoveryCase> {
+    return this.manualOutcome(caseId, 'escalated', 'manual_escalation', reason);
+  }
+
+  /** Applies an operator's verdict, or records that the case had already reached an outcome. */
+  private async manualOutcome(caseId: string, status: 'stopped' | 'escalated', auditType: string, reason: string): Promise<RecoveryCase> {
     const current = await this.requireCase(caseId);
     const now = this.clock.now().toISOString();
-    let updated = withStatus(current, 'escalated', now, 'escalated');
-    updated = appendAudit(updated, { type: 'manual_escalation', actor: 'operator', at: now, explanation: reason, data: {} });
+    // An outcome already reached is not the operator's to overwrite, but the attempt is auditable.
+    const updated = isTerminal(current.status)
+      ? appendAudit(current, { type: 'manual_action_ignored', actor: 'operator', at: now, explanation: `Case already reached ${current.status}; ${reason} was not applied`, data: { requested: status, status: current.status } })
+      : appendAudit(withStatus(current, status, now, status), { type: auditType, actor: 'operator', at: now, explanation: reason, data: {} });
     await this.store.save(updated);
     return updated;
   }

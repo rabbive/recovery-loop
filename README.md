@@ -55,10 +55,23 @@ An escalated or exhausted case can still transition to `recovered` if the custom
 - `src/diagnosis.ts`: diagnosis engine seam, structured-output validation, and the Anthropic Messages adapter.
 - `src/provider.ts`: the payment-provider contract, the deterministic simulator, and the Razorpay Test Mode adapter.
 - `src/evaluation.ts`: seeded 50+ case evaluation and reconciliation metrics.
-- `src/server.ts`: single-process HTTP API and dashboard.
+- `src/http.ts`: the HTTP boundary — webhook ingestion, operator verdicts, dashboard, and projections.
+- `src/server.ts`: process bootstrap that binds the HTTP boundary to a port.
 - `src/persistence.sql`: PostgreSQL persistence foundation for productionizing the in-memory store.
 
 The workflow accepts its clock, diagnosis engine, policy, store, and provider as dependencies. Tests exercise behavior at that seam rather than private implementation details.
+
+### Webhook ingestion and ordering
+
+Every delivery is verified, parsed, and persisted before orchestration runs: an unsigned body is rejected with `401` and never parsed, and a redelivered event id is stored once, adds no second payment attempt, and answers `200 {"duplicate": true}` instead of `202`.
+
+Ordering is decided by what the case can prove, not by arrival time. A `payment_succeeded` is recovered revenue only when a retry or fallback link could have caused it — otherwise it is audited as `pre_existing_success`. Because money settles independently of the loop, a success is evaluated before any terminal guard, so a case that was escalated or exhausted while the payment was in flight still reconciles. Anything else arriving after an outcome is recorded as `late_event_ignored` and changes nothing.
+
+### Bounded recovery orchestration
+
+The ladder is one authorized recurring retry, then one expiring fallback link, then a terminal outcome. Policy is the only authorizer, and it re-checks the money-bearing facts on every call: the renewal context must still be intact (a case rehydrated from storage never passed through the aggregate's validation), a failed attempt must be on record, the renewal must not already be paid, and a still-live fallback link blocks any further action.
+
+Actions are identified by `idempotencyKey` and stay `pending` until their result is stored, so a process that dies between the provider call and the write re-drives the same identity and the provider replays rather than charging again. `expireLapsedActions` retires a fallback link the customer never paid — nothing else closes a case resting in `fallback_link_available` — and is exposed as `POST /api/expire`. Operators can stop or escalate a live case through `POST /api/cases/:id/stop` and `/escalate`; against a case that already reached an outcome, both record `manual_action_ignored` rather than overwriting it.
 
 ## Synthetic evaluation
 

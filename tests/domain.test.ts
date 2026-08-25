@@ -14,8 +14,12 @@ describe('Recovery Case aggregate', () => {
   it('enforces the lifecycle transition table', () => {
     expect(canTransition('at_risk', 'diagnosed')).toBe(true);
     expect(canTransition('recovered', 'escalated')).toBe(false);
+    // A renewal can be paid from any live status, but a recovered case never re-enters the loop.
+    expect(canTransition('diagnosed', 'recovered')).toBe(true);
+    expect(canTransition('at_risk', 'recovered')).toBe(true);
     const recovered = withStatus(createRecoveryCase('case', context, '2026-01-01T00:00:00.000Z'), 'diagnosed', '2026-01-01T00:00:01.000Z');
-    expect(() => withStatus(recovered, 'recovered', '2026-01-01T00:00:02.000Z')).toThrow(InvalidCaseTransitionError);
+    expect(() => withStatus(recovered, 'retry_scheduled', '2026-01-01T00:00:02.000Z')).not.toThrow();
+    expect(() => withStatus(withStatus(recovered, 'recovered', '2026-01-01T00:00:02.000Z'), 'retry_scheduled', '2026-01-01T00:00:03.000Z')).toThrow(InvalidCaseTransitionError);
   });
 
   it('lets an escalated case still reconcile a real payment success', () => {

@@ -16,7 +16,7 @@ async function runSeededBatch(count = 60, seed = SEED): Promise<EvaluationReport
 }
 
 /** One audit event, carrying only the fields the refusal tally reads. */
-function auditEvent(type: string, data: Record<string, unknown>): AuditEvent {
+function auditEvent(type: AuditEvent['type'], data: Record<string, unknown>): AuditEvent {
   return { id: `audit-${type}-${JSON.stringify(data)}`, caseId: 'case-1', type, actor: 'policy', at: '2026-01-01T00:00:00.000Z', explanation: type, data };
 }
 

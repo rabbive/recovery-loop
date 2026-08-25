@@ -33,8 +33,8 @@ describe('Recovery Case aggregate', () => {
 
   it('assigns stable append-only audit identities', () => {
     const initial = createRecoveryCase('case', context, '2026-01-01T00:00:00.000Z');
-    const first = appendAudit(initial, { type: 'one', actor: 'system', at: '2026-01-01T00:00:01.000Z', explanation: 'first', data: { value: 1 } });
-    const second = appendAudit(first, { type: 'two', actor: 'policy', at: '2026-01-01T00:00:02.000Z', explanation: 'second', data: {} });
+    const first = appendAudit(initial, { type: 'case_opened', actor: 'system', at: '2026-01-01T00:00:01.000Z', explanation: 'first', data: { value: 1 } });
+    const second = appendAudit(first, { type: 'policy_allowed', actor: 'policy', at: '2026-01-01T00:00:02.000Z', explanation: 'second', data: {} });
     expect(second.audit.map((event) => event.id)).toEqual(['case:audit:1', 'case:audit:2']);
     expect(second.audit[0]?.caseId).toBe('case');
     expect(Object.isFrozen(second.audit[0]?.data)).toBe(true);

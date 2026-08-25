@@ -77,10 +77,33 @@ export interface RecoveryAction {
   readonly result?: string;
 }
 
+/**
+ * Every kind of entry the timeline can hold. It is a union rather than a string because the
+ * counters and projections that read the timeline match these spellings: with a free-form string,
+ * renaming an emitter would silently zero a published figure and still typecheck.
+ */
+export type AuditEventType =
+  | 'case_opened'
+  | `case_${Exclude<CaseStatus, 'at_risk' | 'diagnosed' | 'retry_scheduled' | 'fallback_link_available'>}`
+  | 'diagnosis_created'
+  | 'diagnosis_unavailable'
+  | 'policy_allowed'
+  | 'policy_blocked'
+  | 'provider_event_received'
+  | 'provider_action_result'
+  | 'retry_failed'
+  | 'retry_ineligible'
+  | 'fallback_link_expired'
+  | 'late_event_ignored'
+  | 'pre_existing_success'
+  | 'manual_stop'
+  | 'manual_escalation'
+  | 'manual_action_ignored';
+
 export interface AuditEvent {
   readonly id: string;
   readonly caseId: string;
-  readonly type: string;
+  readonly type: AuditEventType;
   readonly actor: 'system' | 'diagnosis_model' | 'policy' | 'provider' | 'operator';
   readonly at: string;
   readonly explanation: string;

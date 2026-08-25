@@ -77,7 +77,7 @@ An escalated or exhausted case can still transition to `recovered` if the custom
 - `src/recovery.ts`: application workflow seam, deterministic policy, store, and idempotent action execution.
 - `src/diagnosis.ts`: diagnosis engine seam, structured-output validation, and the Anthropic Messages adapter.
 - `src/provider.ts`: the payment-provider contract, the deterministic simulator, and the Razorpay Test Mode adapter.
-- `src/evaluation.ts`: seeded 50+ case evaluation and reconciliation metrics.
+- `src/evaluation.ts`: the seeded 50+ case dataset, the batch runner, and reconciliation metrics.
 - `src/http.ts`: the HTTP boundary — webhook ingestion, operator verdicts, dashboard, and projections.
 - `src/server.ts`: process bootstrap that binds the HTTP boundary to a port.
 - `src/persistence.sql`: PostgreSQL persistence foundation for productionizing the in-memory store.
@@ -103,8 +103,16 @@ Actions are identified by `idempotencyKey` and stay `pending` until their result
 ## Synthetic evaluation
 
 ```bash
-node --input-type=module -e "import('./dist/src/evaluation.js').then(async ({runEvaluation}) => console.log(await runEvaluation()))"
+node --input-type=module -e "import('./dist/src/evaluation.js').then(async ({runEvaluation}) => console.log((await runEvaluation()).metrics))"
 ```
+
+`generateEvaluationCases(count, seed)` builds a seeded batch of 60 cases cycling 14 scenario archetypes: transient retry recovery, duplicate success delivery, delayed and contradictory events after settlement, retry failure into fallback recovery, a lapsed fallback link, an unavailable fallback link, a late success after both rungs were spent, hard decline, low confidence, unusable diagnosis output, an ineligible payment method that steps down a rung, a renewal paid outside the loop, a cancelled subscription, and a failure the provider mislabelled as temporary.
+
+Each case carries ground truth — the real failure category, the action that was safe given that truth, whether it should recover revenue, and the expected outcome — beside the case rather than inside it. The workflow reads only the scripted provider deliveries, and every provider operation goes through `RecoveryWorkflow`, so the batch measures the loop the product ships. `diagnosisAccuracy` scores whichever `DiagnosisEngine` the run is given (the default predicts from the provider failure code alone, and the mislabelled archetype is one it gets wrong on purpose). `safeActionMismatches` counts the cases where the loop spent a rung ground truth calls unsafe — it may only do so when a misleading provider signal misled the diagnosis, which is what the mislabelled archetype proves.
+
+`runEvaluation` gives every case its own store, simulator, and `FixedClock` seeded from `startedAt`, so link expiry and event ordering are deterministic and repeated runs of a seed publish identical totals. The report is `{ metrics, results }`. `metrics` is labelled `synthetic` and records the seed, dataset version, policy version, and diagnosis model version alongside failed renewal value, recovered and unrecovered amount, recovery rate, retry and fallback recovery, escalation, exhaustion, stopped cases, diagnosis accuracy, and the unsafe actions, duplicate actions, duplicate deliveries, and late deliveries prevented. `results` holds one row per case with its Recovery Case, so every published total reconciles to individual case outcomes and their audit trails — a renewal collected after both rungs failed is counted as recovered revenue but reported as `recovered_unattributed` rather than credited to an action that failed.
+
+`POST /api/evaluation` runs the same batch and persists the Recovery Cases it drove, so the dashboard shows the cases the metrics came from; its `revenueAtRisk` stays the renewal value the loop did not collect, matching the live projection.
 
 Synthetic results must not be presented as expected production performance. Razorpay credentials are optional and only used for a separately configured Test Mode integration.
 

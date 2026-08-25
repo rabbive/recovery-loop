@@ -118,6 +118,15 @@ describe.each(implementations)('payment provider contract: $name', ({ make, sign
     expect(eligibility.reason.length).toBeGreaterThan(0);
   });
 
+  it('never charges a case it reports as ineligible', async () => {
+    const provider = make();
+    for (const ineligible of [paidCase(), cardCase()]) {
+      const result = await provider.submitRetry(ineligible, action('retry', ineligible.id));
+      expect(result.status).toBe('failed');
+      expect(result.providerReference).toBeUndefined();
+    }
+  });
+
   it('creates a fallback link that expires after the current time', async () => {
     const provider = make();
     const result = await provider.createFallbackLink(mandateCase(), action('fallback_link'));

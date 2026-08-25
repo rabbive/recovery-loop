@@ -112,6 +112,10 @@ export class DeterministicSimulator implements PaymentProvider {
   async submitRetry(recoveryCase: RecoveryCase, action: RecoveryAction): Promise<ProviderResult> {
     const replayed = this.replay(action);
     if (replayed) return replayed;
+    // The simulator must be no more permissive than the live adapter, or a case the adapter would
+    // refuse still recovers in the seeded evaluation.
+    const eligibility = await this.retryEligibility(recoveryCase);
+    if (!eligibility.eligible) return { status: 'failed', message: `Retry is not supported for this payment: ${eligibility.reason}` };
     this.calls.push(action);
     const scenario = this.scenarios.get(recoveryCase.id);
     const result: ProviderResult = scenario?.retry === 'failure'

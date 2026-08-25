@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import type { PaymentAttempt, ProviderEvent, RecoveryAction, RecoveryCase } from './domain.js';
 
 export interface Clock {
@@ -135,24 +135,52 @@ export class DeterministicSimulator implements PaymentProvider {
 export interface RazorpayTestModeOptions {
   readonly keyId: string;
   readonly keySecret: string;
+  /** Razorpay signs webhooks with the webhook secret, which is configured separately from the API key. */
+  readonly webhookSecret?: string;
   readonly baseUrl?: string;
   readonly fetcher?: typeof fetch;
   readonly clock?: Clock;
 }
 
+/** Razorpay rejects a receipt or reference longer than this, so long action identities are folded. */
+const REFERENCE_MAX_LENGTH = 40;
+
+/** Razorpay payment states that mean money moved. `created` and `failed` did not charge anything. */
+const LIVE_PAYMENT_STATUSES = ['authorized', 'captured', 'refunded'];
+
+interface RazorpayResponse {
+  readonly ok: boolean;
+  readonly status: number;
+  readonly payload: Record<string, unknown>;
+  /** Set when the request never reached Razorpay, so a transport failure reads differently from a decline. */
+  readonly transportError?: string;
+}
+
+interface MandateIdentity {
+  readonly tokenId: string;
+  readonly customerId: string;
+  readonly email: string;
+  readonly contact: string;
+}
+
+/**
+ * The live integration behind the same `PaymentProvider` contract the simulator implements.
+ * It performs only operations Razorpay's public API documents: charging an existing authorized
+ * recurring mandate again, and creating an expiring payment link. It never claims it can
+ * recharge an arbitrary card payment, and it refuses to run against non-Test-Mode credentials.
+ */
 export class RazorpayTestModeProvider implements PaymentProvider {
   constructor(private readonly options: RazorpayTestModeOptions) {}
 
   /** The webhook signature Razorpay would send for this body. Exposed for contract tests. */
   signPayload(raw: string): string {
-    return createHmac('sha256', this.options.keySecret).update(raw).digest('hex');
+    return createHmac('sha256', this.webhookSecret()).update(raw).digest('hex');
   }
 
   verifyEvent(raw: string, signature: string): boolean {
-    if (!raw || !signature || !this.options.keySecret) return false;
-    const expected = createHmac('sha256', this.options.keySecret).update(raw).digest('hex');
+    if (!raw || !signature || !this.webhookSecret()) return false;
     const supplied = Buffer.from(signature, 'utf8');
-    const computed = Buffer.from(expected, 'utf8');
+    const computed = Buffer.from(this.signPayload(raw), 'utf8');
     return supplied.length === computed.length && timingSafeEqual(supplied, computed);
   }
 
@@ -169,82 +197,193 @@ export class RazorpayTestModeProvider implements PaymentProvider {
   }
 
   async retryEligibility(recoveryCase: RecoveryCase): Promise<RetryEligibility> {
-    const attempt = recoveryCase.attempts[0];
-    return attempt?.method === 'recurring_mandate'
-      ? { eligible: true, reason: 'Recurring mandate supplied by provider' }
-      : { eligible: false, reason: 'Only provider-supported recurring mandates may be retried' };
+    return this.mandateAttempt(recoveryCase) === undefined
+      ? { eligible: false, reason: 'Only provider-supported recurring mandates may be retried' }
+      : { eligible: true, reason: 'Recurring mandate supplied by provider' };
   }
 
-  async submitRetry(recoveryCase: RecoveryCase, _action: RecoveryAction): Promise<ProviderResult> {
-    if (!this.credentialed()) return { status: 'failed', message: 'Razorpay credentials are not configured' };
-    const eligibility = await this.retryEligibility(recoveryCase);
+  /**
+   * Charges the mandate behind the failed renewal again: read the original payment, refuse unless it
+   * carries a recurring token, create or reuse an order keyed by the action identity, then charge.
+   * Reusing the identity resolves the existing charge instead of making a second one, so an
+   * infrastructure retry cannot collect the renewal twice.
+   */
+  async submitRetry(recoveryCase: RecoveryCase, action: RecoveryAction): Promise<ProviderResult> {
+    const refusal = this.refusal();
+    if (refusal) return { status: 'failed', message: refusal };
+    const attempt = this.mandateAttempt(recoveryCase);
     // Razorpay's public API cannot recharge an arbitrary card payment; say so instead of pretending.
-    if (!eligibility.eligible) return { status: 'failed', message: `Retry is not supported for this payment: ${eligibility.reason}` };
-    return { status: 'submitted', message: 'Razorpay Test Mode retry is delegated to the existing recurring mandate' };
+    if (attempt === undefined) return { status: 'failed', message: 'Retry is not supported for this payment: no authorized recurring mandate is on record' };
+
+    const original = await this.call('GET', `/v1/payments/${encodeURIComponent(attempt.providerPaymentId)}`);
+    if (!original.ok) return { status: 'failed', message: `Razorpay could not read the original payment ${attempt.providerPaymentId}: HTTP ${original.status}: ${this.describe(original)}` };
+    const mandate = this.mandateOf(original.payload);
+    if (mandate === undefined) return { status: 'failed', message: `Razorpay payment ${attempt.providerPaymentId} carries no authorized recurring mandate token, so it cannot be charged again` };
+
+    const receipt = this.reference(action.idempotencyKey);
+    const existingOrder = await this.findOrderByReceipt(receipt);
+    if (existingOrder !== undefined) {
+      const charged = await this.findPaymentOfOrder(existingOrder);
+      if (charged !== undefined) return { status: 'submitted', providerReference: charged, message: 'Razorpay already holds a recurring charge for this action identity', idempotent: true };
+    }
+    const order = existingOrder ?? await this.createOrder(recoveryCase, receipt);
+    if (typeof order !== 'string') return order;
+    return this.chargeMandate(recoveryCase, order, mandate);
   }
 
   async createFallbackLink(recoveryCase: RecoveryCase, action: RecoveryAction): Promise<FallbackLinkResult> {
     const expiresAtSeconds = Math.floor(this.now().getTime() / 1000) + FALLBACK_LINK_TTL_SECONDS;
     const expiresAt = new Date(expiresAtSeconds * 1000).toISOString();
-    if (!this.credentialed()) return { status: 'failed', message: 'Razorpay credentials are not configured', expiresAt };
-    const fetcher = this.options.fetcher ?? fetch;
+    const refusal = this.refusal();
+    if (refusal) return { status: 'failed', message: refusal, expiresAt };
+    const reference = this.reference(action.idempotencyKey);
     // reference_id must be unique per link, so the action identity carries the idempotency:
     // a duplicate is rejected by Razorpay rather than creating a second link.
-    const body = {
+    const created = await this.call('POST', '/v1/payment_links', {
       amount: recoveryCase.context.amount,
       currency: recoveryCase.context.currency,
-      reference_id: action.idempotencyKey,
+      reference_id: reference,
       expire_by: expiresAtSeconds,
       description: `Renewal recovery for order ${recoveryCase.context.orderId}`,
       notes: { caseId: recoveryCase.id, subscriptionId: recoveryCase.context.subscriptionId },
-    };
-    let response: Response;
-    try {
-      response = await fetcher(`${this.options.baseUrl ?? 'https://api.razorpay.com'}/v1/payment_links`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Basic ${Buffer.from(`${this.options.keyId}:${this.options.keySecret}`).toString('base64')}` },
-        body: JSON.stringify(body),
-      });
-    } catch (error) {
-      return { status: 'failed', message: `Razorpay payment-link request failed: ${error instanceof Error ? error.message : String(error)}`, expiresAt };
-    }
-    const payload = await this.readJson(response);
-    if (response.ok) {
+    });
+    if (created.ok) {
       // A created link without an id means the response is not what the API documents.
-      if (typeof payload.id !== 'string') return { status: 'failed', message: 'Razorpay returned a payment link without an id', expiresAt };
-      return { status: 'submitted', providerReference: payload.id, message: 'Razorpay Test Mode payment link created', expiresAt };
+      if (typeof created.payload.id !== 'string') return { status: 'failed', message: 'Razorpay returned a payment link without an id', expiresAt };
+      return { status: 'submitted', providerReference: created.payload.id, message: 'Razorpay Test Mode payment link created', expiresAt };
     }
-    const description = this.errorDescription(payload);
-    if (response.status === 400 && /already exists/i.test(description)) {
+    const description = this.describe(created);
+    if (created.status === 400 && /already exists/i.test(description)) {
       // The link already exists, so look up its real id rather than synthesizing one.
-      const existing = await this.findLinkByReference(action.idempotencyKey, fetcher);
+      const existing = await this.findLinkByReference(reference);
       return existing === undefined
         ? { status: 'submitted', message: 'Razorpay already holds a payment link for this action identity, but its id could not be resolved', expiresAt, idempotent: true }
         : { status: 'submitted', providerReference: existing, message: 'Razorpay already holds a payment link for this action identity', expiresAt, idempotent: true };
     }
-    return { status: 'failed', message: `Razorpay payment-link request returned HTTP ${response.status}: ${description}`, expiresAt };
+    return { status: 'failed', message: `Razorpay payment-link request returned HTTP ${created.status}: ${description}`, expiresAt };
   }
 
-  private async findLinkByReference(reference: string, fetcher: typeof fetch): Promise<string | undefined> {
+  /** Submits the recurring charge itself. Its outcome arrives by webhook, not in this response. */
+  private async chargeMandate(recoveryCase: RecoveryCase, orderId: string, mandate: MandateIdentity): Promise<ProviderResult> {
+    const charge = await this.call('POST', '/v1/payments/create/recurring', {
+      email: mandate.email,
+      contact: mandate.contact,
+      amount: recoveryCase.context.amount,
+      currency: recoveryCase.context.currency,
+      order_id: orderId,
+      customer_id: mandate.customerId,
+      token: mandate.tokenId,
+      recurring: '1',
+      description: `Renewal recovery for order ${recoveryCase.context.orderId}`,
+    });
+    if (!charge.ok) return { status: 'failed', message: `Razorpay recurring charge returned HTTP ${charge.status}: ${this.describe(charge)}` };
+    const paymentId = charge.payload.razorpay_payment_id;
+    // A charge without a payment id is not the documented response, so nothing may be called submitted.
+    return typeof paymentId === 'string'
+      ? { status: 'submitted', providerReference: paymentId, message: 'Razorpay Test Mode recurring charge submitted against the authorized mandate' }
+      : { status: 'failed', message: 'Razorpay accepted the recurring charge without returning a payment id' };
+  }
+
+  /** Creates the order the recurring charge is collected against, or the failure that stopped it. */
+  private async createOrder(recoveryCase: RecoveryCase, receipt: string): Promise<string | ProviderResult> {
+    const order = await this.call('POST', '/v1/orders', {
+      amount: recoveryCase.context.amount,
+      currency: recoveryCase.context.currency,
+      receipt,
+      notes: { caseId: recoveryCase.id, subscriptionId: recoveryCase.context.subscriptionId },
+    });
+    if (!order.ok) return { status: 'failed', message: `Razorpay order creation returned HTTP ${order.status}: ${this.describe(order)}` };
+    return typeof order.payload.id === 'string' ? order.payload.id : { status: 'failed', message: 'Razorpay returned an order without an id' };
+  }
+
+  private async findOrderByReceipt(receipt: string): Promise<string | undefined> {
+    const response = await this.call('GET', '/v1/orders', undefined, { receipt });
+    return response.ok ? this.firstId(response.payload.items) : undefined;
+  }
+
+  /**
+   * The live charge already collected against this order, if there is one. Razorpay lists failed and
+   * created payments here too, and neither is a charge: replaying one would strand the action on a
+   * result whose webhook has already fired, so only a payment that took the money counts.
+   */
+  private async findPaymentOfOrder(orderId: string): Promise<string | undefined> {
+    const response = await this.call('GET', `/v1/orders/${encodeURIComponent(orderId)}/payments`);
+    if (!response.ok || !Array.isArray(response.payload.items)) return undefined;
+    const live = response.payload.items.find((item): item is { id: string; status: string } => {
+      if (typeof item !== 'object' || item === null) return false;
+      const candidate = item as { id?: unknown; status?: unknown };
+      return typeof candidate.id === 'string' && typeof candidate.status === 'string' && LIVE_PAYMENT_STATUSES.includes(candidate.status);
+    });
+    return live?.id;
+  }
+
+  private async findLinkByReference(reference: string): Promise<string | undefined> {
+    const response = await this.call('GET', '/v1/payment_links', undefined, { reference_id: reference });
+    return response.ok ? this.firstId(response.payload.payment_links) : undefined;
+  }
+
+  /**
+   * The failed recurring attempt this case may charge again, if the provider supports one. A case
+   * that already has a succeeded attempt is paid, so nothing may be charged against it, and the
+   * target is the latest failed mandate attempt rather than the oldest one on record.
+   */
+  private mandateAttempt(recoveryCase: RecoveryCase): PaymentAttempt | undefined {
+    if (recoveryCase.attempts.some((attempt) => attempt.status === 'succeeded')) return undefined;
+    return [...recoveryCase.attempts].reverse().find((attempt) => attempt.method === 'recurring_mandate' && attempt.status === 'failed' && Boolean(attempt.providerPaymentId));
+  }
+
+  /** The mandate identity Razorpay needs to charge again, or undefined when the payment carries none. */
+  private mandateOf(payment: Record<string, unknown>): MandateIdentity | undefined {
+    const tokenId = typeof payment.token_id === 'string' ? payment.token_id : undefined;
+    const customerId = typeof payment.customer_id === 'string' ? payment.customer_id : undefined;
+    const email = typeof payment.email === 'string' ? payment.email : undefined;
+    const contact = typeof payment.contact === 'string' ? payment.contact : undefined;
+    if (payment.recurring !== true || !tokenId || !customerId || !email || !contact) return undefined;
+    return { tokenId, customerId, email, contact };
+  }
+
+  /** Folds an action identity into the length Razorpay accepts while staying deterministic. */
+  private reference(idempotencyKey: string): string {
+    if (idempotencyKey.length <= REFERENCE_MAX_LENGTH) return idempotencyKey;
+    const digest = createHash('sha256').update(idempotencyKey).digest('hex').slice(0, 8);
+    return `${idempotencyKey.slice(0, REFERENCE_MAX_LENGTH - digest.length - 1)}_${digest}`;
+  }
+
+  /** Why no money operation may run, or undefined when the adapter is safely configured. */
+  private refusal(): string | undefined {
+    if (!this.options.keyId || !this.options.keySecret) return 'Razorpay credentials are not configured';
+    // The MVP never moves real money, so live credentials are refused rather than trusted.
+    return this.options.keyId.startsWith('rzp_test_') ? undefined : 'Razorpay credentials are not Test Mode keys, so no money operation was attempted';
+  }
+
+  private async call(method: 'GET' | 'POST', path: string, body?: Record<string, unknown>, query?: Record<string, string>): Promise<RazorpayResponse> {
+    const url = new URL(`${this.options.baseUrl ?? 'https://api.razorpay.com'}${path}`);
+    for (const [key, value] of Object.entries(query ?? {})) url.searchParams.set(key, value);
+    const fetcher = this.options.fetcher ?? fetch;
+    let response: Response;
     try {
-      const url = new URL(`${this.options.baseUrl ?? 'https://api.razorpay.com'}/v1/payment_links`);
-      url.searchParams.set('reference_id', reference);
-      const response = await fetcher(url.toString(), {
-        method: 'GET',
-        headers: { authorization: `Basic ${Buffer.from(`${this.options.keyId}:${this.options.keySecret}`).toString('base64')}` },
+      response = await fetcher(url.toString(), {
+        method,
+        headers: {
+          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+          authorization: `Basic ${Buffer.from(`${this.options.keyId}:${this.options.keySecret}`).toString('base64')}`,
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
-      if (!response.ok) return undefined;
-      const payload = await this.readJson(response);
-      const links = Array.isArray(payload.payment_links) ? payload.payment_links : [];
-      const match = links.find((link): link is { id: string } => typeof link === 'object' && link !== null && typeof (link as { id?: unknown }).id === 'string');
-      return match?.id;
-    } catch {
-      return undefined;
+    } catch (error) {
+      return { ok: false, status: 0, payload: {}, transportError: error instanceof Error ? error.message : String(error) };
     }
+    return { ok: response.ok, status: response.status, payload: await this.readJson(response) };
   }
 
-  private credentialed(): boolean {
-    return Boolean(this.options.keyId && this.options.keySecret);
+  private firstId(items: unknown): string | undefined {
+    if (!Array.isArray(items)) return undefined;
+    const match = items.find((item): item is { id: string } => typeof item === 'object' && item !== null && typeof (item as { id?: unknown }).id === 'string');
+    return match?.id;
+  }
+
+  private webhookSecret(): string {
+    return this.options.webhookSecret ?? this.options.keySecret;
   }
 
   private now(): Date {
@@ -260,8 +399,10 @@ export class RazorpayTestModeProvider implements PaymentProvider {
     }
   }
 
-  private errorDescription(payload: Record<string, unknown>): string {
-    const error = typeof payload.error === 'object' && payload.error !== null ? payload.error as Record<string, unknown> : {};
+  /** The provider's own words for a failure, so an operator sees why rather than a status code alone. */
+  private describe(response: RazorpayResponse): string {
+    if (response.transportError !== undefined) return `request failed: ${response.transportError}`;
+    const error = typeof response.payload.error === 'object' && response.payload.error !== null ? response.payload.error as Record<string, unknown> : {};
     return typeof error.description === 'string' ? error.description : 'no error description';
   }
 }

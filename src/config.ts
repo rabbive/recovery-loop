@@ -3,6 +3,7 @@ export interface RuntimeConfig {
   readonly databaseUrl?: string;
   readonly razorpayKeyId?: string;
   readonly razorpayKeySecret?: string;
+  readonly razorpayWebhookSecret?: string;
   readonly anthropicApiKey?: string;
   readonly anthropicModel?: string;
   readonly diagnosisTimeoutMilliseconds?: number;
@@ -16,6 +17,8 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Runtim
   const razorpayKeyId = environment.RAZORPAY_KEY_ID?.trim() || undefined;
   const razorpayKeySecret = environment.RAZORPAY_KEY_SECRET?.trim() || undefined;
   if ((razorpayKeyId === undefined) !== (razorpayKeySecret === undefined)) throw new Error('RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET must be configured together');
+  // Razorpay signs webhooks with the webhook secret, which is issued separately from the API key.
+  const razorpayWebhookSecret = environment.RAZORPAY_WEBHOOK_SECRET?.trim() || undefined;
   const anthropicApiKey = environment.ANTHROPIC_API_KEY?.trim() || undefined;
   const anthropicModel = environment.ANTHROPIC_MODEL?.trim() || undefined;
   const rawTimeout = environment.DIAGNOSIS_TIMEOUT_MS?.trim() || undefined;
@@ -29,6 +32,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Runtim
     ...(databaseUrl === undefined ? {} : { databaseUrl }),
     ...(razorpayKeyId === undefined ? {} : { razorpayKeyId }),
     ...(razorpayKeySecret === undefined ? {} : { razorpayKeySecret }),
+    ...(razorpayWebhookSecret === undefined ? {} : { razorpayWebhookSecret }),
     ...(anthropicApiKey === undefined ? {} : { anthropicApiKey }),
     ...(anthropicModel === undefined ? {} : { anthropicModel }),
     ...(diagnosisTimeoutMilliseconds === undefined ? {} : { diagnosisTimeoutMilliseconds }),

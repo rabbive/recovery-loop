@@ -28,7 +28,12 @@ export function createRecoveryApplication(options: RecoveryApplicationOptions): 
   const store = options.store ?? postgresStore ?? new InMemoryRecoveryStore();
   const provider = options.provider ?? (options.config.razorpayKeySecret === undefined
     ? new DeterministicSimulator(new Map(), clock)
-    : new RazorpayTestModeProvider({ keyId: options.config.razorpayKeyId ?? '', keySecret: options.config.razorpayKeySecret }));
+    : new RazorpayTestModeProvider({
+      keyId: options.config.razorpayKeyId ?? '',
+      keySecret: options.config.razorpayKeySecret,
+      ...(options.config.razorpayWebhookSecret === undefined ? {} : { webhookSecret: options.config.razorpayWebhookSecret }),
+      clock,
+    }));
   const diagnosisEngine = options.diagnosisEngine ?? (options.config.anthropicApiKey === undefined
     ? new FixtureDiagnosisEngine()
     : new AnthropicDiagnosisEngine(new AnthropicMessagesModel({

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createRecoveryApplication } from '../src/application.js';
-import { createRequestListener } from '../src/http.js';
+import { createRequestListener, type CaseDetail, type CaseSummary } from '../src/http.js';
 import { FixedClock } from '../src/provider.js';
 import { InMemoryRecoveryStore } from '../src/recovery.js';
 
@@ -197,5 +197,151 @@ describe('operator surface', () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ expired: [] });
     expect((await store.get('case-1'))?.status).toBe('retry_scheduled');
+  });
+});
+
+describe('case drill-down', () => {
+  it('projects one case from failure through diagnosis, policy, actions, and audit timeline', async () => {
+    await post(failedRenewal());
+
+    const response = await fetch(`${origin}/api/cases/case-1`);
+
+    expect(response.status).toBe(200);
+    const detail = await response.json() as CaseDetail;
+    expect(detail).toMatchObject({ id: 'case-1', status: 'retry_scheduled', context, recoveredAmount: 0 });
+    // The operator has to be able to see why the model recommended what it did.
+    expect(detail.diagnosis).toMatchObject({ failureCategory: 'transient', recommendedAction: 'retry' });
+    expect(detail.diagnosis?.evidence.length).toBeGreaterThan(0);
+    expect(typeof detail.diagnosis?.explanation).toBe('string');
+    // ...and why deterministic policy allowed or blocked it.
+    expect(detail.decisions[0]).toMatchObject({ action: 'retry', allowed: true });
+    expect(typeof detail.decisions[0]?.reason).toBe('string');
+    expect(detail.actions.map((action) => action.kind)).toEqual(['retry']);
+    expect(detail.attempts.length).toBeGreaterThan(0);
+    expect(detail.events.map((event) => event.type)).toEqual(['payment_failed']);
+    expect(detail.audit.length).toBeGreaterThan(0);
+    expect(detail.audit[0]).toMatchObject({ caseId: 'case-1' });
+    expect(typeof detail.audit[0]?.actor).toBe('string');
+  });
+
+  it('reports a case that does not exist', async () => {
+    const response = await fetch(`${origin}/api/cases/case-nope`);
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ error: expect.stringContaining('case-nope') });
+  });
+
+  it('filters the case list by status', async () => {
+    await post(failedRenewal());
+
+    const [matching, other] = await Promise.all([
+      fetch(`${origin}/api/cases?status=retry_scheduled`).then((response) => response.json()),
+      fetch(`${origin}/api/cases?status=recovered`).then((response) => response.json()),
+    ]);
+
+    expect(matching).toMatchObject([{ id: 'case-1' }]);
+    expect(other).toEqual([]);
+  });
+
+  it('rejects a filter no case status can satisfy instead of silently returning nothing', async () => {
+    const response = await fetch(`${origin}/api/cases?status=not_a_status`);
+
+    expect(response.status).toBe(400);
+  });
+
+  it('carries the customer and outcome the case list is filtered and read by', async () => {
+    await post(failedRenewal());
+    await fetch(`${origin}/api/cases/case-1/stop`, { method: 'POST' });
+
+    expect(await fetch(`${origin}/api/cases`).then((response) => response.json())).toMatchObject([
+      { id: 'case-1', status: 'stopped', outcome: 'stopped', customerId: 'customer-1', currency: 'INR' },
+    ]);
+  });
+});
+
+describe('evaluation projection', () => {
+  it('reports that no batch has run yet', async () => {
+    const response = await fetch(`${origin}/api/evaluation`);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ available: false });
+  });
+
+  it('replays the last batch without re-running it', async () => {
+    const ran = await fetch(`${origin}/api/evaluation`, { method: 'POST' }).then((response) => response.json()) as { metrics: unknown; results: unknown[] };
+
+    const replayed = await fetch(`${origin}/api/evaluation`).then((response) => response.json()) as { available: boolean; metrics: unknown; results: unknown[] };
+
+    expect(replayed.available).toBe(true);
+    expect(replayed.metrics).toEqual(ran.metrics);
+    expect(replayed.results).toHaveLength(ran.results.length);
+  });
+
+  it('carries the ground truth and the runtime result the evaluation panel compares', async () => {
+    const batch = await fetch(`${origin}/api/evaluation`, { method: 'POST' }).then((response) => response.json()) as { results: Record<string, unknown>[] };
+
+    // Expected safe action and outcome are ground truth; the authorized action and status are
+    // what the loop actually did. The panel puts them side by side, so both must be projected.
+    expect(batch.results[0]).toMatchObject({
+      caseId: expect.any(String),
+      archetype: expect.any(String),
+      expected: { safeAction: expect.any(String), outcome: expect.any(String) },
+      firstAuthorizedAction: expect.any(String),
+      outcome: expect.any(String),
+      recoveryPath: expect.any(String),
+      recoveredAmount: expect.any(Number),
+      status: expect.any(String),
+    });
+  });
+});
+
+describe('dashboard demo path', () => {
+  it('walks failure, diagnosis, policy, operator verdict, and audit through the projections the dashboard reads', async () => {
+    await post(failedRenewal());
+
+    const listed = await fetch(`${origin}/api/cases?status=retry_scheduled`).then((response) => response.json()) as CaseSummary[];
+    const opened = await fetch(`${origin}/api/cases/${listed[0]!.id}`).then((response) => response.json()) as CaseDetail;
+    expect(opened.diagnosis?.recommendedAction).toBe('retry');
+    expect(opened.decisions.some((decision) => decision.allowed)).toBe(true);
+
+    await fetch(`${origin}/api/cases/case-1/escalate`, { method: 'POST' });
+
+    const after = await fetch(`${origin}/api/cases/case-1`).then((response) => response.json()) as CaseDetail;
+    expect(after.status).toBe('escalated');
+    expect(after.audit.map((entry) => entry.type)).toContain('manual_escalation');
+    expect(after.audit.some((entry) => entry.actor === 'operator')).toBe(true);
+    expect(await fetch(`${origin}/api/metrics`).then((response) => response.json())).toMatchObject({ escalated: 1 });
+  });
+
+  it('advances a simulated result and shows recovered metrics and audit events through the same projections', async () => {
+    await post(failedRenewal());
+    const authorized = await fetch(`${origin}/api/cases/case-1`).then((response) => response.json()) as CaseDetail;
+    expect(authorized.actions.map((action) => action.kind)).toEqual(['retry']);
+
+    // The provider settles the authorized retry: this is the demo's "advance a simulated result".
+    await post({ id: 'event-2', type: 'payment.captured', caseId: 'case-1', occurredAt: '2026-01-01T00:05:00.000Z' });
+
+    const recovered = await fetch(`${origin}/api/cases/case-1`).then((response) => response.json()) as CaseDetail;
+    expect(recovered.status).toBe('recovered');
+    expect(recovered.recoveredAmount).toBe(1200);
+    expect(recovered.audit.some((entry) => entry.actor === 'provider')).toBe(true);
+    expect(await fetch(`${origin}/api/metrics`).then((response) => response.json())).toMatchObject({ recoveredAmount: 1200, recoveryRate: 1, revenueAtRisk: 0 });
+    expect(await fetch(`${origin}/api/cases?status=recovered`).then((response) => response.json())).toMatchObject([{ id: 'case-1', recoveredAmount: 1200 }]);
+  });
+
+  it('serves a dashboard whose script parses, so a syntax slip cannot ship as a blank page', async () => {
+    const html = await fetch(origin).then((response) => response.text());
+
+    const script = /<script>(?<body>[\s\S]*)<\/script>/.exec(html)?.groups?.body ?? '';
+    expect(script.length).toBeGreaterThan(0);
+    expect(() => new Function(script)).not.toThrow();
+  });
+
+  it('serves a dashboard that reaches the drill-down, filter, and operator endpoints', async () => {
+    const html = await fetch(origin).then((response) => response.text());
+
+    for (const fragment of ['/api/cases/', '/api/metrics', '/api/evaluation', 'status=', '/stop', '/escalate']) {
+      expect(html).toContain(fragment);
+    }
   });
 });

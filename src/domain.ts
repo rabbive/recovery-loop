@@ -121,6 +121,9 @@ const allowedTransitions: Readonly<Record<CaseStatus, readonly CaseStatus[]>> = 
   stopped: ['stopped'],
 };
 
+/** Every status a Recovery Case can hold, derived from the transition table so the two cannot drift. */
+export const caseStatuses = Object.keys(allowedTransitions) as readonly CaseStatus[];
+
 export class InvalidCaseTransitionError extends Error {
   constructor(readonly from: CaseStatus, readonly to: CaseStatus) {
     super(`Invalid Recovery Case transition: ${from} -> ${to}`);

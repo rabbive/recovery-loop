@@ -123,7 +123,7 @@ export function labScenarios(runId: string, now: string): readonly LabScenario[]
     {
       key: 'ordering',
       title: 'A late failure cannot undo a success',
-      description: 'Deliveries arrive out of order. Once the renewal is captured the case is recovered, and a stale failure that was generated earlier but arrives later must not reopen it or authorize another charge.',
+      description: 'Deliveries arrive out of order. Once the renewal is captured the case is recovered, and a stale failure that was generated earlier but arrives later must not reopen it or authorize another charge. What holds here is the terminal-state rule — a recovered case accepts no further recovery action — rather than a comparison of the two timestamps.',
       caseId: orderingCase,
       steps: [
         {

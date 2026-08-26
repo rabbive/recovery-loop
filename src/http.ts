@@ -101,13 +101,12 @@ document.querySelector('#filter').onchange=refresh;
 document.querySelector('#run').onclick=async()=>{await fetch('/api/evaluation',{method:'POST'});await refresh()};
 
 // The lab signs each body, then delivers it to the real webhook route and reports what came back.
-async function deliver(payload,tamper){
-  const raw=JSON.stringify(payload);
-  const signed=await fetch('/api/lab/sign',{method:'POST',headers:{'content-type':'application/json'},body:raw});
+async function deliver(run,scenario,step,tamper){
+  const signed=await fetch('/api/lab/sign',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({run:run,scenario:scenario,step:step})});
   if(!signed.ok)return{status:signed.status,body:{error:'The replay lab is unavailable on this instance.'}};
-  const {signature}=await signed.json();
+  const {rawBody,signature}=await signed.json();
   // Tampering alters the delivered bytes only, so the signature still belongs to the original body.
-  const sent=tamper?raw.slice(0,-1)+',"injected":true}':raw;
+  const sent=tamper?rawBody.slice(0,-1)+',"injected":true}':rawBody;
   const response=await fetch('/webhooks/razorpay',{method:'POST',headers:{'content-type':'application/json','x-razorpay-signature':signature},body:sent});
   let body={};try{body=await response.json()}catch(e){}
   return{status:response.status,body:body};
@@ -118,14 +117,16 @@ async function replay(){
   const note=document.querySelector('#labnote');
   panel.innerHTML='<span class="muted">Delivering…</span>';
   note.textContent='';
-  const scenarios=await get('/api/lab/scenarios?run='+Date.now().toString(36));
+  const run=Date.now().toString(36);
+  const scenarios=await get('/api/lab/scenarios?run='+run);
   if(!Array.isArray(scenarios)){panel.innerHTML='<span class="muted">The replay lab is available only in simulator mode.</span>';return}
   const blocks=[];
   let passed=0,total=0;
   for(const scenario of scenarios){
     const steps=[];
-    for(const step of scenario.steps){
-      const result=await deliver(step.payload,step.tamper===true);
+    for(let i=0;i<scenario.steps.length;i++){
+      const step=scenario.steps[i];
+      const result=await deliver(run,scenario.key,i,step.tamper===true);
       const ok=result.status===step.expectStatus;
       total++;if(ok)passed++;
       steps.push('<div class="step '+(ok?'pass':'fail')+'"><div class="what"><strong>'+esc(step.label)+'</strong> — '+esc(step.expect)+'</div>'+
@@ -374,17 +375,27 @@ export function createRequestListener(application: RecoveryApplication): (reques
       return send(response, 200, JSON.stringify(labScenarios(runId, clock.now().toISOString()) as LabScenario[]));
     }
     if (request.method === 'POST' && url.pathname === '/api/lab/sign') {
-      let raw: string;
+      let request_: { run?: unknown; scenario?: unknown; step?: unknown };
       try {
-        raw = await readBody(request);
+        request_ = JSON.parse(await readBody(request)) as typeof request_;
       } catch (error) {
-        return send(response, 413, JSON.stringify({ error: String(error) }));
+        return send(response, 400, JSON.stringify({ error: `Invalid lab request: ${String(error)}` }));
       }
-      // Sign exactly the bytes the caller will deliver, so the lab proves the real signature check
-      // rather than a re-serialized approximation of it.
+      // The lab signs only payloads this repo authored, never bytes a caller chose. A public
+      // simulator-mode instance would otherwise let anyone mint a valid delivery and drive the
+      // dashboard — inflating recovered revenue or burying the seeded batch in synthetic cases.
+      const runId = typeof request_.run === 'string' && request_.run.trim() !== '' ? request_.run : undefined;
+      if (runId === undefined) return send(response, 400, JSON.stringify({ error: 'A lab run id is required' }));
+      const scenario = labScenarios(runId, clock.now().toISOString()).find((candidate) => candidate.key === request_.scenario);
+      if (!scenario) return send(response, 404, JSON.stringify({ error: `Unknown lab scenario: ${String(request_.scenario)}` }));
+      const step = typeof request_.step === 'number' ? scenario.steps[request_.step] : undefined;
+      if (!step) return send(response, 404, JSON.stringify({ error: `Unknown step of lab scenario ${scenario.key}: ${String(request_.step)}` }));
       const sign = provider.signEvent;
       if (typeof sign !== 'function') return send(response, 404, JSON.stringify({ error: 'The replay lab is available only in simulator mode' }));
-      return send(response, 200, JSON.stringify({ signature: sign.call(provider, raw) }));
+      // Returning the exact bytes it signed keeps the browser from re-serializing them, so what the
+      // boundary verifies is what the lab signed.
+      const rawBody = JSON.stringify(step.payload);
+      return send(response, 200, JSON.stringify({ rawBody, signature: sign.call(provider, rawBody) }));
     }
     if (request.method === 'GET' && url.pathname === '/api/evaluation') {
       // The dashboard reloads without re-running the batch, so a refresh — or a restart —

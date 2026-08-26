@@ -27,16 +27,23 @@ afterEach(async () => {
   if (server) await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
 });
 
-/** Signs a body through the lab, then delivers it to the real webhook boundary. */
-async function deliver(body: unknown, tamper = false): Promise<Response> {
-  const raw = JSON.stringify(body);
-  const signed = await fetch(`${origin}/api/lab/sign`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: raw });
-  const { signature } = await signed.json() as { signature: string };
+/** Has the lab sign one of its own steps, then delivers it to the real webhook boundary. */
+async function deliver(run: string, scenario: string, step: number, tamper = false): Promise<Response> {
+  const signed = await fetch(`${origin}/api/lab/sign`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ run, scenario, step }),
+  });
+  const { rawBody, signature } = await signed.json() as { rawBody: string; signature: string };
   // Tampering alters the delivered bytes only, leaving the signature bound to the original body.
-  const delivered = tamper ? `${raw.slice(0, -1)},"injected":true}` : raw;
+  const delivered = tamper ? `${rawBody.slice(0, -1)},"injected":true}` : rawBody;
   return fetch(`${origin}/webhooks/razorpay`, {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-razorpay-signature': signature }, body: delivered,
   });
+}
+
+const RUN = 'run-1';
+/** The scenario set the server will rebuild for RUN, so a test can read the case ids it will use. */
+function scenariosForRun(): readonly LabScenario[] {
+  return labScenarios(RUN, NOW);
 }
 
 describe('webhook replay lab', () => {
@@ -50,17 +57,17 @@ describe('webhook replay lab', () => {
     expect(first.map((scenario) => scenario.caseId)).not.toEqual(second.map((scenario) => scenario.caseId));
   });
 
-  it('signs a body the boundary then accepts', async () => {
-    const [open] = labScenarios('run-1', NOW);
-    const response = await deliver(open!.steps[0]!.payload);
+  it('signs its own step, which the boundary then accepts', async () => {
+    const [open] = scenariosForRun();
+    const response = await deliver(RUN, 'open', 0);
     expect(response.status).toBe(202);
     expect(await response.json()).toMatchObject({ accepted: true, duplicate: false, caseId: open!.caseId });
   });
 
   it('recognises a redelivered event rather than acting twice', async () => {
-    const duplicate = labScenarios('run-1', NOW).find((scenario) => scenario.key === 'duplicate')!;
-    const first = await deliver(duplicate.steps[0]!.payload);
-    const second = await deliver(duplicate.steps[1]!.payload);
+    const duplicate = scenariosForRun().find((scenario) => scenario.key === 'duplicate')!;
+    const first = await deliver(RUN, 'duplicate', 0);
+    const second = await deliver(RUN, 'duplicate', 1);
     expect(first.status).toBe(202);
     expect(second.status).toBe(200);
     expect(await second.json()).toMatchObject({ duplicate: true });
@@ -70,24 +77,46 @@ describe('webhook replay lab', () => {
   });
 
   it('keeps a recovered case recovered when a stale failure arrives late', async () => {
-    const ordering = labScenarios('run-1', NOW).find((scenario) => scenario.key === 'ordering')!;
-    for (const step of ordering.steps) expect((await deliver(step.payload)).status).toBe(step.expectStatus);
+    const ordering = scenariosForRun().find((scenario) => scenario.key === 'ordering')!;
+    for (const [index, step] of ordering.steps.entries()) {
+      expect((await deliver(RUN, 'ordering', index)).status).toBe(step.expectStatus);
+    }
     const detail = await (await fetch(`${origin}/api/cases/${encodeURIComponent(ordering.caseId)}`)).json() as { status: string };
     expect(detail.status).toBe('recovered');
   });
 
   it('rejects a body altered after it was signed, before anything downstream sees it', async () => {
-    const forged = labScenarios('run-1', NOW).find((scenario) => scenario.key === 'forged')!;
-    const response = await deliver(forged.steps[0]!.payload, true);
+    const forged = scenariosForRun().find((scenario) => scenario.key === 'forged')!;
+    const response = await deliver(RUN, 'forged', 0, true);
     expect(response.status).toBe(401);
     // Verification precedes parsing and storage, so the forged delivery opened no case at all.
     expect((await fetch(`${origin}/api/cases/${encodeURIComponent(forged.caseId)}`)).status).toBe(404);
   });
 
+  /**
+   * The lab must never sign bytes a caller chose. A public simulator-mode instance would otherwise
+   * let anyone mint a valid delivery — inflating recovered revenue on the dashboard, or burying the
+   * seeded batch under synthetic cases.
+   */
+  it('refuses to sign anything but its own authored steps', async () => {
+    const forged = { id: 'attacker-1', type: 'payment.captured', caseId: 'case-1', occurredAt: NOW };
+    for (const body of [
+      JSON.stringify(forged),
+      JSON.stringify({ run: RUN, scenario: 'open', step: 99 }),
+      JSON.stringify({ run: RUN, scenario: 'no-such-scenario', step: 0 }),
+      JSON.stringify({ scenario: 'open', step: 0 }),
+      JSON.stringify({ run: RUN, scenario: 'open', payload: forged }),
+    ]) {
+      const response = await fetch(`${origin}/api/lab/sign`, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+      expect([400, 404]).toContain(response.status);
+      expect(await response.text()).not.toContain('sim:');
+    }
+  });
+
   it('every scenario step declares the status the boundary actually answers with', async () => {
-    for (const scenario of labScenarios('run-1', NOW)) {
-      for (const step of scenario.steps) {
-        expect((await deliver(step.payload, step.tamper ?? false)).status).toBe(step.expectStatus);
+    for (const scenario of scenariosForRun()) {
+      for (const [index, step] of scenario.steps.entries()) {
+        expect((await deliver(RUN, scenario.key, index, step.tamper ?? false)).status).toBe(step.expectStatus);
       }
     }
   });

@@ -3,7 +3,7 @@ import type { RecoveryApplication } from './application.js';
 import type { NormalizedEventInput } from './provider.js';
 import { caseStatuses, isTerminal, terminalStatuses, type CaseStatus, type RecoveryCase } from './domain.js';
 import { fallbackRecoveryMessage } from './messaging.js';
-import { generateEvaluationCases, runEvaluation, toEvaluationRun } from './evaluation.js';
+import { publishSeededBatch } from './evaluation.js';
 import { labScenarios, type LabScenario } from './lab.js';
 
 function send(response: ServerResponse, status: number, body: string, contentType = 'application/json'): void {
@@ -405,12 +405,7 @@ export function createRequestListener(application: RecoveryApplication): (reques
       return send(response, 200, JSON.stringify({ available: true, ...latestRun }));
     }
     if (request.method === 'POST' && url.pathname === '/api/evaluation') {
-      const evaluation = await runEvaluation(generateEvaluationCases(60, 42));
-      const run = toEvaluationRun(evaluation, clock.now().toISOString());
-      await evaluationRuns.saveRun(run);
-      // The batch already drove real Recovery Cases, so the dashboard shows those rather than
-      // re-running a second, differently-shaped loop for display.
-      for (const result of evaluation.results) await store.save(result.recoveryCase);
+      const run = await publishSeededBatch(store, evaluationRuns, clock.now().toISOString());
       return send(response, 200, JSON.stringify({ available: true, ...run }));
     }
     send(response, 404, JSON.stringify({ error: 'Not found' }));

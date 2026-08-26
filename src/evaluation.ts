@@ -1,7 +1,7 @@
 import { DiagnosisUnavailableError, type DiagnosisEngine } from './diagnosis.js';
 import type { AuditEvent, CaseStatus, Diagnosis, FailureCategory, ProviderEvent, RecoveryCase, RenewalContext } from './domain.js';
 import { DeterministicSimulator, FixedClock, type SimulatorScenario } from './provider.js';
-import { DeterministicPolicy, InMemoryRecoveryStore, POLICY_VERSION, RecoveryWorkflow } from './recovery.js';
+import { DeterministicPolicy, InMemoryRecoveryStore, POLICY_VERSION, RecoveryWorkflow, type RecoveryStore } from './recovery.js';
 
 /**
  * The reproducible synthetic batch. Nothing here runs against a live provider: the deterministic
@@ -672,4 +672,26 @@ export async function runEvaluation(
     },
     results,
   };
+}
+
+
+export const SEEDED_BATCH_CASE_COUNT = 60;
+export const SEEDED_BATCH_SEED = 42;
+
+/**
+ * Runs the seeded batch and publishes it, saving the cases it drove alongside the run.
+ *
+ * The batch is deterministic, so re-publishing cannot change what the dashboard claims: the same
+ * seed and case count always produce the same totals. That is what makes it safe to do on boot as
+ * well as on demand — a restarted instance shows the same figures it showed before, rather than an
+ * empty dashboard someone has to know to populate.
+ */
+export async function publishSeededBatch(store: RecoveryStore, evaluationRuns: EvaluationRunStore, publishedAt: string, caseCount = SEEDED_BATCH_CASE_COUNT, seed = SEEDED_BATCH_SEED): Promise<EvaluationRun> {
+  const evaluation = await runEvaluation(generateEvaluationCases(caseCount, seed));
+  const run = toEvaluationRun(evaluation, publishedAt);
+  await evaluationRuns.saveRun(run);
+  // The batch already drove real Recovery Cases, so the dashboard shows those rather than
+  // re-running a second, differently-shaped loop for display.
+  for (const result of evaluation.results) await store.save(result.recoveryCase);
+  return run;
 }

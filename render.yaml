@@ -1,0 +1,30 @@
+# Render blueprint for the public demo instance.
+#
+# The free plan sleeps a service after 15 minutes without traffic and takes about a minute to wake,
+# so the app publishes the seeded batch on start (see `publishSeededBatchIfMissing` in
+# src/server.ts). A visitor arriving at a cold instance therefore waits, but then sees figures
+# rather than an empty dashboard.
+#
+# Razorpay credentials are deliberately absent. Without them the app runs the deterministic
+# simulator, which is what the batch metrics are built on, and it is also what keeps the replay lab
+# available — the lab's signing endpoint exists only when the provider is the simulator, so a
+# credentialled instance could never serve it. Set them only on an instance you do not intend to
+# demo the lab from.
+services:
+  - type: web
+    name: recovery-loop
+    runtime: node
+    plan: free
+    region: singapore
+    branch: main
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      # The app requires Node 22 (see `engines` in package.json).
+      - key: NODE_VERSION
+        value: "22"
+      # Set in the Render dashboard to run model-backed diagnosis instead of the fixture engine.
+      # The seeded batch always uses fixtures, so this never changes the published figures.
+      - key: ANTHROPIC_API_KEY
+        sync: false

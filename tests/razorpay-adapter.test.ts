@@ -87,7 +87,58 @@ describe('Razorpay Test Mode recurring retry', () => {
     expect(order?.body.amount).toBe(4999);
     expect(order?.body.currency).toBe('INR');
     const charge = requests.find((request) => request.url.endsWith('/v1/payments/create/recurring'));
-    expect(charge?.body).toMatchObject({ token: 'token_1', customer_id: 'cust_1', email: 'renewal@example.com', contact: '+919900000000', order_id: 'order_Rz1', currency: 'INR', amount: 4999, recurring: '1' });
+    expect(charge?.body).toMatchObject({ token: 'token_1', customer_id: 'cust_1', email: 'renewal@example.com', contact: '+919900000000', order_id: 'order_Rz1', currency: 'INR', amount: 4999, recurring: true });
+    // `recurring` is a boolean because that is the type Razorpay's API reference gives it. Recurring
+    // is not enabled on our Test Mode account, so this shape has never been exercised live.
+
+  });
+
+  /**
+   * Razorpay does not document `recurring` on the payment-fetch response, so a payload without it
+   * must still be chargeable — otherwise every real mandate payment is refused and the retry path
+   * is unreachable. These pin that tolerance rather than leaving it to assumption.
+   */
+  it.each([
+    ['absent', {}],
+    ['boolean true', { recurring: true }],
+    ['string "true"', { recurring: 'true' }],
+    ['string "1"', { recurring: '1' }],
+    ['number 1', { recurring: 1 }],
+  ])('charges the mandate when the payment\'s recurring flag is %s', async (_label, flag) => {
+    const { provider } = razorpay({
+      payment: { id: 'pay_original', token_id: 'token_1', customer_id: 'cust_1', email: 'renewal@example.com', contact: '+919900000000', method: 'card', ...flag },
+    });
+    const result = await provider.submitRetry(mandateCase(), action('retry'));
+    expect(result.status).toBe('submitted');
+    expect(result.providerReference).toBe('pay_retry1');
+  });
+
+  it.each([
+    ['boolean false', { recurring: false }],
+    ['string "0"', { recurring: '0' }],
+    ['number 0', { recurring: 0 }],
+  ])('refuses the charge when the recurring flag is an explicit negative (%s)', async (_label, flag) => {
+    const { requests, provider } = razorpay({
+      payment: { id: 'pay_original', token_id: 'token_1', customer_id: 'cust_1', email: 'renewal@example.com', contact: '+919900000000', method: 'card', ...flag },
+    });
+    const result = await provider.submitRetry(mandateCase(), action('retry'));
+    expect(result.status).toBe('failed');
+    expect(result.providerReference).toBeUndefined();
+    expect(requests.filter((request) => request.url.endsWith('/v1/payments/create/recurring'))).toHaveLength(0);
+  });
+
+  it.each([
+    ['token_id', 'token_id'],
+    ['customer_id', 'customer_id'],
+    ['email', 'email'],
+    ['contact', 'contact'],
+  ])('still refuses the charge when the documented field %s is missing', async (_label, missing) => {
+    const full: Record<string, unknown> = { id: 'pay_original', recurring: true, token_id: 'token_1', customer_id: 'cust_1', email: 'renewal@example.com', contact: '+919900000000', method: 'card' };
+    delete full[missing];
+    const { requests, provider } = razorpay({ payment: full });
+    const result = await provider.submitRetry(mandateCase(), action('retry'));
+    expect(result.status).toBe('failed');
+    expect(requests.filter((request) => request.url.endsWith('/v1/payments/create/recurring'))).toHaveLength(0);
   });
 
   it('replays the existing charge when the same action identity is submitted twice', async () => {

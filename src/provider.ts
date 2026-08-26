@@ -67,6 +67,24 @@ export function chargeableMandateAttempt(recoveryCase: RecoveryCase): PaymentAtt
   return [...recoveryCase.attempts].reverse().find((attempt) => attempt.method === 'recurring_mandate' && attempt.status === 'failed' && Boolean(attempt.providerPaymentId));
 }
 
+/**
+ * Whether a payment's `recurring` flag permits charging its mandate again.
+ *
+ * Razorpay does not document `recurring` as a field of `GET /v1/payments/:id` at all — it is
+ * documented on the token entity instead, and it is absent from Razorpay's own webhook payload
+ * samples, which do carry `token_id`. So its absence cannot disqualify a payment: treating a
+ * missing flag as "not recurring" would reject every real mandate payment and leave the retry
+ * path unreachable. Absence therefore means unknown, and `token_id` is what actually proves a
+ * mandate exists. A flag that *is* present is honoured in each shape Razorpay might send it, and
+ * only an explicit negative refuses the charge.
+ *
+ * See docs/research/razorpay-test-mode-mandate-setup.md for the sourced findings.
+ */
+export function mandateFlagAllows(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  return value === true || value === 'true' || value === '1' || value === 1;
+}
+
 export interface SimulatorScenario {
   readonly retry: 'success' | 'failure' | 'unsupported';
   readonly fallback: 'success' | 'failure';
@@ -286,7 +304,7 @@ export class RazorpayTestModeProvider implements PaymentProvider {
       order_id: orderId,
       customer_id: mandate.customerId,
       token: mandate.tokenId,
-      recurring: '1',
+      recurring: true,
       description: `Renewal recovery for order ${recoveryCase.context.orderId}`,
     });
     if (!charge.ok) return { status: 'failed', message: `Razorpay recurring charge returned HTTP ${charge.status}: ${this.describe(charge)}` };
@@ -341,7 +359,7 @@ export class RazorpayTestModeProvider implements PaymentProvider {
     const customerId = typeof payment.customer_id === 'string' ? payment.customer_id : undefined;
     const email = typeof payment.email === 'string' ? payment.email : undefined;
     const contact = typeof payment.contact === 'string' ? payment.contact : undefined;
-    if (payment.recurring !== true || !tokenId || !customerId || !email || !contact) return undefined;
+    if (!mandateFlagAllows(payment.recurring) || !tokenId || !customerId || !email || !contact) return undefined;
     return { tokenId, customerId, email, contact };
   }
 

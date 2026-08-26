@@ -48,6 +48,14 @@ export type FallbackLinkResult = ProviderResult & { readonly expiresAt: string }
  */
 export interface PaymentProvider {
   verifyEvent(raw: string, signature: string): boolean;
+  /**
+   * Signs a synthetic delivery so the replay lab can exercise the real webhook boundary.
+   *
+   * Deliberately optional, and deliberately absent from the Razorpay adapter: a deployed instance
+   * holding real credentials must never expose an endpoint that will sign an arbitrary body as
+   * though Razorpay sent it. Presence of this method is what makes the lab available at all.
+   */
+  signEvent?(raw: string): string;
   normalizeEvent(input: NormalizedEventInput, receivedAt: string): ProviderEvent;
   retryEligibility(recoveryCase: RecoveryCase): Promise<RetryEligibility>;
   submitRetry(recoveryCase: RecoveryCase, action: RecoveryAction): Promise<ProviderResult>;
@@ -105,6 +113,11 @@ export class DeterministicSimulator implements PaymentProvider {
 
   verifyEvent(raw: string, signature: string): boolean {
     return raw.length > 0 && signature === `sim:${raw}`;
+  }
+
+  /** The counterpart of `verifyEvent`, so a lab delivery is signed rather than waved through. */
+  signEvent(raw: string): string {
+    return `sim:${raw}`;
   }
 
   normalizeEvent(input: NormalizedEventInput, receivedAt: string): ProviderEvent {

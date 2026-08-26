@@ -165,6 +165,22 @@ Each case carries ground truth — the real failure category, the action that wa
 
 Synthetic results must not be presented as expected production performance. Razorpay credentials are optional and only used for a separately configured Test Mode integration.
 
+## Deployment
+
+The public demo runs on Heroku. `Procfile` names the web process; Heroku runs `npm run build`
+automatically because the package defines a build script. `engines.node` is pinned to `22.x` so a
+deploy cannot silently move to a Node major nothing here has been tested against.
+
+The instance runs without Razorpay credentials on purpose. Without them the app uses the
+deterministic simulator — which is what the published batch figures are built on, and what keeps the
+replay lab available, since the lab's signing endpoint exists only when the provider can sign
+(see `signEvent` in `src/provider.ts`). A credentialled instance serves no lab.
+
+`ANTHROPIC_API_KEY` is optional. Unset, the app runs `FixtureDiagnosisEngine`; the seeded batch
+always uses fixtures either way, so a key never changes the published metrics.
+
+`render.yaml` is kept as a working alternative host definition, not the deployed target.
+
 ## Documentation
 
 - [MVP specification](docs/specs/recovery-loop-mvp.md)

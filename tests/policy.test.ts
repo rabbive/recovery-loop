@@ -42,6 +42,16 @@ function diagnosedCase(overrides: { actions?: readonly RecoveryAction[]; status?
 }
 
 describe('DeterministicPolicy rule matrix', () => {
+  it('refuses the recommended money action itself when the case is already terminal', () => {
+    // The reason a charge is refused has to name the charge: a merchant reading "policy refused
+    // a retry" is reading a safety control that fired, not a case that was routed to a human.
+    const terminal = diagnosedCase({ status: 'escalated' });
+
+    const decision = policy.decide(terminal, diagnosis({ recommendedAction: 'retry' }), now);
+
+    expect(decision).toMatchObject({ action: 'retry', allowed: false, reason: 'Case is terminal' });
+  });
+
   const unsafeCategories: readonly FailureCategory[] = ['hard_decline', 'cancelled', 'dispute', 'unknown', 'unsupported'];
 
   it.each(unsafeCategories)('escalates %s rather than automating it', (failureCategory) => {

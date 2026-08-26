@@ -2,9 +2,15 @@ import { readFile } from 'node:fs/promises';
 import { Pool, type PoolConfig } from 'pg';
 import type { RecoveryCase } from './domain.js';
 import type { RecoveryStore } from './recovery.js';
+import type { EvaluationRun, EvaluationRunStore } from './evaluation.js';
 
 export class PostgresRecoveryStore implements RecoveryStore {
-  constructor(private readonly pool: Pool) {}
+  /** Published batches live in the same database as the cases they reconcile to. */
+  readonly evaluationRuns: EvaluationRunStore;
+
+  constructor(private readonly pool: Pool) {
+    this.evaluationRuns = new PostgresEvaluationRunStore(pool);
+  }
 
   async initialize(): Promise<void> {
     const schema = await readFile(new URL('./persistence.sql', import.meta.url), 'utf8');
@@ -92,6 +98,30 @@ export class PostgresRecoveryStore implements RecoveryStore {
   }
 
   async close(): Promise<void> { await this.pool.end(); }
+}
+
+export class PostgresEvaluationRunStore implements EvaluationRunStore {
+  constructor(private readonly pool: Pool) {}
+
+  async saveRun(run: EvaluationRun): Promise<void> {
+    await this.pool.query(
+      `insert into evaluation_runs (seed, dataset_version, policy_version, started_at, recorded_at, metrics, results)
+       values ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)`,
+      // The columns are the searchable projection of what `metrics` already records.
+      [run.metrics.seed, run.metrics.datasetVersion, run.metrics.policyVersion, run.metrics.startedAt, run.recordedAt, JSON.stringify(run.metrics), JSON.stringify(run.results)],
+    );
+  }
+
+  /** The batch a merchant was shown most recently. Earlier runs stay on record, unpublished. */
+  async latestRun(): Promise<EvaluationRun | undefined> {
+    const result = await this.pool.query<{ recorded_at: Date; metrics: EvaluationRun['metrics']; results: EvaluationRun['results'] }>(
+      'select recorded_at, metrics, results from evaluation_runs order by recorded_at desc, id desc limit 1',
+    );
+    const row = result.rows[0];
+    if (!row) return undefined;
+    return { recordedAt: row.recorded_at.toISOString(), metrics: row.metrics, results: row.results };
+  }
+
 }
 
 export function createPostgresStore(connectionString = process.env.DATABASE_URL, config: PoolConfig = {}): PostgresRecoveryStore {

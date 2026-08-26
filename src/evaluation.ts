@@ -1,5 +1,5 @@
 import { DiagnosisUnavailableError, type DiagnosisEngine } from './diagnosis.js';
-import type { Diagnosis, FailureCategory, ProviderEvent, RecoveryCase, RenewalContext } from './domain.js';
+import type { AuditEvent, CaseStatus, Diagnosis, FailureCategory, ProviderEvent, RecoveryCase, RenewalContext } from './domain.js';
 import { DeterministicSimulator, FixedClock, type SimulatorScenario } from './provider.js';
 import { DeterministicPolicy, InMemoryRecoveryStore, POLICY_VERSION, RecoveryWorkflow } from './recovery.js';
 
@@ -257,8 +257,12 @@ export interface EvaluationCaseResult {
   readonly fallbackActions: number;
   /** Money operations the provider performed for this case. */
   readonly providerOperations: number;
-  /** Money actions deterministic policy refused on this case. */
+  /** Charges deterministic policy refused. */
   readonly unsafeActionsPrevented: number;
+  /** Recommendations policy refused that proposed no money action, routing the case to a human. */
+  readonly recommendationsRefused: number;
+  /** Retries the provider reported ineligible, after which the loop steps down a rung. */
+  readonly providerIneligibleRetries: number;
   /** Re-drives through the workflow that performed no second money operation. */
   readonly duplicateActionsPrevented: number;
   readonly duplicateEventsIgnored: number;
@@ -299,6 +303,8 @@ export interface EvaluationMetrics {
   readonly diagnosedCases: number;
   readonly diagnosisAccuracy: number;
   readonly unsafeActionsPrevented: number;
+  readonly recommendationsRefused: number;
+  readonly providerIneligibleRetries: number;
   readonly duplicateActionsPrevented: number;
   readonly duplicateEventsIgnored: number;
   readonly lateEventsIgnored: number;
@@ -306,6 +312,42 @@ export interface EvaluationMetrics {
   readonly safeActionMismatches: number;
   /** Cases whose observed outcome differed from ground truth. A trustworthy batch reports zero. */
   readonly expectationMismatches: number;
+}
+
+/** One published batch, as a merchant was shown it: ground truth, metrics, and per-case result. */
+export interface EvaluationRunCaseResult extends Omit<EvaluationCaseResult, 'recoveryCase'> {
+  readonly status: CaseStatus;
+}
+
+export interface EvaluationRun {
+  /** When the batch was published. The seed, versions, and start are `metrics`' own record. */
+  readonly recordedAt: string;
+  readonly metrics: EvaluationMetrics;
+  readonly results: readonly EvaluationRunCaseResult[];
+}
+
+/** Projects a finished report into the run that gets published, stored, and replayed. */
+export function toEvaluationRun(report: EvaluationReport, recordedAt: string): EvaluationRun {
+  return {
+    recordedAt,
+    metrics: report.metrics,
+    results: report.results.map(({ recoveryCase, ...summary }) => ({ ...summary, status: recoveryCase.status })),
+  };
+}
+
+/**
+ * Published batches, latest first. A merchant who has seen a figure must keep seeing it, so a
+ * run outlives the process that produced it rather than living in one server's memory.
+ */
+export interface EvaluationRunStore {
+  saveRun(run: EvaluationRun): Promise<void>;
+  latestRun(): Promise<EvaluationRun | undefined>;
+}
+
+export class InMemoryEvaluationRunStore implements EvaluationRunStore {
+  private latest: EvaluationRun | undefined;
+  async saveRun(run: EvaluationRun): Promise<void> { this.latest = run; }
+  async latestRun(): Promise<EvaluationRun | undefined> { return this.latest; }
 }
 
 export interface EvaluationReport {
@@ -516,12 +558,39 @@ async function runCase(evaluationCase: EvaluationCase, startedAt: string, engine
     retryActions: settled.actions.filter((action) => action.kind === 'retry').length,
     fallbackActions: settled.actions.filter((action) => action.kind === 'fallback_link').length,
     providerOperations: provider.calls.length,
-    unsafeActionsPrevented: settled.audit.filter((event) => event.type === 'policy_blocked').length,
+    // A charge deterministic policy refused. Policy blocking an escalate or stop recommendation
+    // prevented no charge — it agreed with a diagnosis that proposed none — and a retry the
+    // provider called ineligible is a capability miss the loop steps down from, after which the
+    // customer may still be charged through the fallback link. Both are counted on their own
+    // rather than inflating a figure a reader takes as "the policy engine stopped a bad charge".
+    ...tallyRefusals(settled.audit),
     duplicateActionsPrevented,
     duplicateEventsIgnored,
     lateEventsIgnored: settled.audit.filter((event) => event.type === 'late_event_ignored').length,
     auditEvents: settled.audit.length,
     recoveryCase: settled,
+  };
+}
+
+/**
+ * Splits the refusals in an audit trail three ways, because they mean different things to a
+ * merchant. A charge deterministic policy refused is a safety control that fired. Policy refusing
+ * a recommendation that proposed no charge — an escalation the diagnosis itself asked for —
+ * prevented nothing. A retry the provider called ineligible is a capability miss the loop steps
+ * down from, after which the customer may still be charged through the fallback link. Folding any
+ * of them together inflates the one figure a reader takes as "a bad charge was stopped".
+ */
+export function tallyRefusals(audit: readonly AuditEvent[]): {
+  unsafeActionsPrevented: number;
+  recommendationsRefused: number;
+  providerIneligibleRetries: number;
+} {
+  const blocked = audit.filter((event) => event.type === 'policy_blocked');
+  const refusedCharges = blocked.filter((event) => event.data.action === 'retry' || event.data.action === 'fallback_link');
+  return {
+    unsafeActionsPrevented: refusedCharges.length,
+    recommendationsRefused: blocked.length - refusedCharges.length,
+    providerIneligibleRetries: audit.filter((event) => event.type === 'retry_ineligible').length,
   };
 }
 
@@ -593,6 +662,8 @@ export async function runEvaluation(
       diagnosedCases,
       diagnosisAccuracy: rate(count((result) => result.diagnosisCorrect), diagnosedCases),
       unsafeActionsPrevented: sum((result) => result.unsafeActionsPrevented),
+      recommendationsRefused: sum((result) => result.recommendationsRefused),
+      providerIneligibleRetries: sum((result) => result.providerIneligibleRetries),
       duplicateActionsPrevented: sum((result) => result.duplicateActionsPrevented),
       duplicateEventsIgnored: sum((result) => result.duplicateEventsIgnored),
       lateEventsIgnored: sum((result) => result.lateEventsIgnored),

@@ -1,7 +1,9 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { RecoveryApplication } from './application.js';
 import type { NormalizedEventInput } from './provider.js';
-import { generateEvaluationCases, runEvaluation } from './evaluation.js';
+import { caseStatuses, isTerminal, terminalStatuses, type CaseStatus, type RecoveryCase } from './domain.js';
+import { fallbackRecoveryMessage } from './messaging.js';
+import { generateEvaluationCases, runEvaluation, toEvaluationRun } from './evaluation.js';
 
 function send(response: ServerResponse, status: number, body: string, contentType = 'application/json'): void {
   response.writeHead(status, { 'content-type': `${contentType}; charset=utf-8`, 'cache-control': 'no-store' });
@@ -12,13 +14,83 @@ function dashboard(): string {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Recovery Loop</title><style>
-body{font:16px system-ui;margin:0;background:#f6f7f9;color:#18202a}main{max-width:1100px;margin:auto;padding:32px}h1{margin-top:0}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.card{background:white;border:1px solid #dfe3e8;border-radius:10px;padding:16px}.label{color:#64748b;font-size:13px}.value{font-size:28px;font-weight:700;margin-top:6px}button{background:#155eef;color:white;border:0;border-radius:6px;padding:9px 12px;cursor:pointer}table{width:100%;margin-top:20px;background:white;border-collapse:collapse}th,td{text-align:left;padding:11px;border-bottom:1px solid #e5e7eb}code{background:#eef2ff;padding:2px 4px;border-radius:4px}.muted{color:#64748b}</style></head>
+body{font:16px system-ui;margin:0;background:#f6f7f9;color:#18202a}main{max-width:1180px;margin:auto;padding:32px}h1{margin-top:0}h2{margin:28px 0 8px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}.card{background:white;border:1px solid #dfe3e8;border-radius:10px;padding:16px}
+.label{color:#64748b;font-size:13px}.value{font-size:26px;font-weight:700;margin-top:6px}
+button{background:#155eef;color:white;border:0;border-radius:6px;padding:9px 12px;cursor:pointer}button.ghost{background:white;color:#b42318;border:1px solid #f0c2bd}
+select{padding:8px;border-radius:6px;border:1px solid #cbd5e1;background:white}
+table{width:100%;margin-top:12px;background:white;border-collapse:collapse}th,td{text-align:left;padding:10px;border-bottom:1px solid #e5e7eb;font-size:14px}
+tr.case{cursor:pointer}tr.case:hover{background:#f8fafc}tr.case.selected{background:#eef2ff}
+code{background:#eef2ff;padding:2px 4px;border-radius:4px}.muted{color:#64748b}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.panel{background:white;border:1px solid #dfe3e8;border-radius:10px;padding:18px;margin-top:12px}
+.pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;background:#eef2ff;color:#155eef}.pill.no{background:#fef3f2;color:#b42318}
+ul{margin:6px 0;padding-left:20px}li{font-size:14px}.timeline li{margin-bottom:6px}
+pre.preview{background:#f8fafc;border:1px solid #e5e7eb;border-radius:8px;padding:12px;white-space:pre-wrap;font:14px system-ui;margin:6px 0}
+</style></head>
 <body><main><h1>Recovery Loop</h1><p class="muted">Synthetic recovery control plane · AI recommends, deterministic policy authorizes.</p>
-<button id="run">Run 60-case evaluation</button><section class="cards" id="cards"></section><h2>Recovery cases</h2><table><thead><tr><th>Case</th><th>Status</th><th>Amount</th><th>Actions</th><th>Audit events</th></tr></thead><tbody id="cases"></tbody></table></main>
+<div class="row"><button id="run">Run 60-case evaluation</button><label class="muted">Status
+<select id="filter"><option value="">All</option>${caseStatuses.map((status) => `<option value="${status}">${status}</option>`).join('')}</select></label>
+<span class="muted" id="batch"></span></div>
+<section class="cards" id="cards"></section>
+<h2>Recovery cases</h2><p class="muted">Select a case to inspect its diagnosis, policy decisions, and audit timeline.</p>
+<table><thead><tr><th>Case</th><th>Customer</th><th>Status</th><th>Failure</th><th>Amount</th><th>Recovered</th><th>Actions</th><th>Audit</th><th>Updated</th></tr></thead><tbody id="cases"></tbody></table>
+<h2>Case detail</h2><div class="panel" id="detail"><span class="muted">No case selected.</span></div>
+<h2>Evaluation run</h2><div class="panel" id="evaluation"><span class="muted">No batch has run yet.</span></div>
+</main>
 <script>
-const money=new Intl.NumberFormat('en-IN',{style:'currency',currency:'INR'});
-async function refresh(){const [m,c]=await Promise.all([fetch('/api/metrics').then(r=>r.json()),fetch('/api/cases').then(r=>r.json())]);document.querySelector('#cards').innerHTML=[['At risk',money.format(m.revenueAtRisk)],['Recovered',money.format(m.recoveredAmount)],['Recovery rate',(m.recoveryRate*100).toFixed(1)+'%'],['Escalated',m.escalated]].map(x=>'<div class="card"><div class="label">'+x[0]+'</div><div class="value">'+x[1]+'</div></div>').join('');document.querySelector('#cases').innerHTML=c.map(x=>'<tr><td><code>'+x.id+'</code></td><td>'+x.status+'</td><td>'+money.format(x.amount)+'</td><td>'+x.actions+'</td><td>'+x.audit+'</td></tr>').join('')||'<tr><td colspan="5">No cases yet. Run the evaluation.</td></tr>'}
-document.querySelector('#run').onclick=async()=>{await fetch('/api/evaluation',{method:'POST'});await refresh()};refresh();
+const TERMINAL=${JSON.stringify([...terminalStatuses])};
+const money=(minor,currency)=>new Intl.NumberFormat('en-IN',{style:'currency',currency:currency||'INR'}).format(minor/100);
+const esc=v=>String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let selected=null;
+const get=path=>fetch(path).then(r=>r.json());
+
+function renderMetrics(m){
+  const b=m.batch;
+  const tiles=[['Revenue at risk',money(m.revenueAtRisk,'INR')],['Recovered',money(m.recoveredAmount,'INR')],['Recovery rate',(m.recoveryRate*100).toFixed(1)+'%'],['Cases',m.totalCases],['Escalated',m.escalated],['Exhausted',m.exhausted]];
+  // The batch's own scoring is the only thing the live projection cannot know: ground truth.
+  if(b)tiles.push(['Batch first-attempt',(b.retryRecoveryRate*100).toFixed(1)+'%'],['Batch fallback',(b.fallbackRecoveryRate*100).toFixed(1)+'%'],['Batch charges policy refused',b.unsafeActionsPrevented],['Batch recommendations refused',b.recommendationsRefused],['Batch ineligible retries',b.providerIneligibleRetries],['Batch duplicates prevented',b.duplicateActionsPrevented],['Batch diagnosis accuracy',(b.diagnosisAccuracy*100).toFixed(1)+'%']);
+  document.querySelector('#cards').innerHTML=tiles.map(t=>'<div class="card"><div class="label">'+t[0]+'</div><div class="value">'+esc(t[1])+'</div></div>').join('');
+  document.querySelector('#batch').textContent=b?'Live figures over all stored cases · seeded batch '+b.seed+' published '+m.batchRecordedAt+' (dataset '+b.datasetVersion+', policy '+b.policyVersion+') · every figure synthetic':'Live figures over all stored cases · no batch published yet · every figure synthetic';
+}
+
+function renderCases(cases){
+  document.querySelector('#cases').innerHTML=cases.map(c=>'<tr class="case'+(c.id===selected?' selected':'')+'" data-id="'+esc(c.id)+'"><td><code>'+esc(c.id)+'</code></td><td>'+esc(c.customerId)+'</td><td>'+esc(c.status)+'</td><td>'+esc(c.failureCategory??'—')+'</td><td>'+money(c.amount,c.currency)+'</td><td>'+money(c.recoveredAmount,c.currency)+'</td><td>'+c.actions+'</td><td>'+c.audit+'</td><td class="muted">'+esc(c.updatedAt)+'</td></tr>').join('')||'<tr><td colspan="9">No cases match. Run the evaluation.</td></tr>';
+  document.querySelectorAll('tr.case').forEach(row=>{row.onclick=()=>openCase(row.dataset.id)});
+}
+
+function renderDetail(c){
+  const d=c.diagnosis;
+  const terminal=TERMINAL.includes(c.status);
+  document.querySelector('#detail').innerHTML=
+    '<div class="row"><h3 style="margin:0"><code>'+esc(c.id)+'</code></h3><span class="pill">'+esc(c.status)+'</span>'+
+    (terminal?'':'<button class="ghost" id="stop">Stop</button><button class="ghost" id="escalate">Escalate</button>')+'</div>'+
+    '<p class="muted">'+esc(c.context.customerId)+' · '+esc(c.context.subscriptionId)+' · '+esc(c.context.orderId)+' · '+money(c.context.amount,c.context.currency)+' due '+esc(c.context.dueAt)+' · recovered '+money(c.recoveredAmount,c.context.currency)+'</p>'+
+    '<h4>Diagnosis</h4>'+(d?'<p>'+esc(d.failureCategory)+' · confidence '+(d.confidence*100).toFixed(0)+'% · recommends '+esc(d.recommendedAction)+' · model '+esc(d.modelVersion)+'</p><p>'+esc(d.explanation)+'</p><ul>'+d.evidence.map(e=>'<li>'+esc(e)+'</li>').join('')+'</ul>':'<p class="muted">No diagnosis recorded.</p>')+
+    '<h4>Policy decisions</h4>'+(c.decisions.length?'<ul>'+c.decisions.map(x=>'<li><span class="pill'+(x.allowed?'':' no')+'">'+(x.allowed?'allowed':'blocked')+'</span> '+esc(x.action)+' — '+esc(x.reason)+' <span class="muted">('+esc(x.policyVersion)+' at '+esc(x.decidedAt)+')</span></li>').join('')+'</ul>':'<p class="muted">None.</p>')+
+    '<h4>Recovery actions</h4>'+(c.actions.length?'<ul>'+c.actions.map(a=>'<li>'+esc(a.kind)+' · '+esc(a.status)+(a.providerReference?' · '+esc(a.providerReference):'')+(a.expiresAt?' · expires '+esc(a.expiresAt):'')+(a.result?' · '+esc(a.result):'')+'</li>').join('')+'</ul>':'<p class="muted">None.</p>')+
+    (c.fallbackMessage?'<h4>Fallback message preview</h4><p class="muted">Preview only — the MVP integrates no email, SMS, WhatsApp, or voice provider'+(c.fallbackMessage.expired?', and this link has expired':'')+'.</p><p><strong>'+esc(c.fallbackMessage.subject)+'</strong></p><pre class="preview">'+esc(c.fallbackMessage.body)+'</pre>':'')+
+    '<h4>Payment attempts</h4>'+(c.attempts.length?'<ul>'+c.attempts.map(a=>'<li>'+esc(a.method)+' · '+esc(a.status)+(a.failureCode?' · '+esc(a.failureCode):'')+' · '+esc(a.occurredAt)+'</li>').join('')+'</ul>':'<p class="muted">None.</p>')+
+    '<h4>Audit timeline</h4><ul class="timeline">'+c.audit.map(e=>'<li><code>'+esc(e.at)+'</code> <strong>'+esc(e.type)+'</strong> <span class="muted">('+esc(e.actor)+')</span> — '+esc(e.explanation)+(Object.keys(e.data).length?' <span class="muted">'+esc(JSON.stringify(e.data))+'</span>':'')+'</li>').join('')+'</ul>';
+  const applyVerdict=async suffix=>{await fetch('/api/cases/'+encodeURIComponent(c.id)+suffix,{method:'POST'});await refresh();await openCase(c.id)};
+  const stop=document.querySelector('#stop');if(stop)stop.onclick=()=>applyVerdict('/stop');
+  const escalate=document.querySelector('#escalate');if(escalate)escalate.onclick=()=>applyVerdict('/escalate');
+}
+
+async function openCase(id){selected=id;const c=await get('/api/cases/'+encodeURIComponent(id));renderDetail(c);renderCases(await get(listUrl()))}
+const listUrl=()=>{const status=document.querySelector('#filter').value;return '/api/cases'+(status?'?status='+encodeURIComponent(status):'')};
+function renderEvaluation(batch){
+  const panel=document.querySelector('#evaluation');
+  if(!batch.available){panel.innerHTML='<span class="muted">No batch has run yet.</span>';return}
+  panel.innerHTML='<p class="muted">'+batch.results.length+' seeded cases · expected safe action and outcome are recorded independently of what the loop predicted.</p>'+
+    '<table><thead><tr><th>Case</th><th>Archetype</th><th>Safe action</th><th>Authorized</th><th>Expected outcome</th><th>Outcome</th><th>Recovered</th></tr></thead><tbody>'+
+    batch.results.map(r=>'<tr class="case" data-id="'+esc(r.caseId)+'"><td><code>'+esc(r.caseId)+'</code></td><td>'+esc(r.archetype)+'</td><td>'+esc(r.expected.safeAction)+'</td><td><span class="pill'+(r.safeActionMatched?'':' no')+'">'+esc(r.firstAuthorizedAction)+'</span></td><td>'+esc(r.expected.outcome)+'</td><td><span class="pill'+(r.matchedExpectation?'':' no')+'">'+esc(r.outcome)+'</span></td><td>'+money(r.recoveredAmount,'INR')+'</td></tr>').join('')+
+    '</tbody></table>';
+  panel.querySelectorAll('tr.case').forEach(row=>{row.onclick=()=>openCase(row.dataset.id)});
+}
+async function refresh(){const [m,c,b]=await Promise.all([get('/api/metrics'),get(listUrl()),get('/api/evaluation')]);renderMetrics(m);renderCases(c);renderEvaluation(b)}
+document.querySelector('#filter').onchange=refresh;
+document.querySelector('#run').onclick=async()=>{await fetch('/api/evaluation',{method:'POST'});await refresh()};
+refresh();
 </script></body></html>`;
 }
 
@@ -80,48 +152,86 @@ export function webhookInput(payload: Record<string, unknown>, fallbackId?: stri
   };
 }
 
+/** Reads the case id a `/api/cases/:id` route matched, undoing the path encoding once. */
+function caseIdFrom(match: RegExpExecArray): string {
+  return decodeURIComponent(match.groups?.caseId ?? '');
+}
+
+/** The case-list row: enough to filter the list and choose a case to open. */
+function caseSummary(recoveryCase: RecoveryCase) {
+  return {
+    id: recoveryCase.id,
+    status: recoveryCase.status,
+    outcome: recoveryCase.outcome ?? null,
+    customerId: recoveryCase.context.customerId,
+    subscriptionId: recoveryCase.context.subscriptionId,
+    amount: recoveryCase.context.amount,
+    currency: recoveryCase.context.currency,
+    recoveredAmount: recoveryCase.recoveredAmount,
+    failureCategory: recoveryCase.diagnosis?.failureCategory ?? null,
+    actions: recoveryCase.actions.length,
+    audit: recoveryCase.audit.length,
+    updatedAt: recoveryCase.updatedAt,
+  };
+}
+
+/**
+ * The whole case, in the order an operator reads it: what the renewal was, what the model
+ * thought and why, what policy authorized or blocked, what was executed, and the append-only
+ * timeline behind all of it. The aggregate is already the audit record, so this projects it
+ * rather than summarizing it — nothing an operator would need to explain a decision is dropped.
+ */
+function caseDetail(recoveryCase: RecoveryCase, now: string) {
+  return {
+    id: recoveryCase.id,
+    status: recoveryCase.status,
+    outcome: recoveryCase.outcome ?? null,
+    context: recoveryCase.context,
+    recoveredAmount: recoveryCase.recoveredAmount,
+    createdAt: recoveryCase.createdAt,
+    updatedAt: recoveryCase.updatedAt,
+    diagnosis: recoveryCase.diagnosis ?? null,
+    decisions: recoveryCase.decisions,
+    actions: recoveryCase.actions,
+    attempts: recoveryCase.attempts,
+    events: recoveryCase.events.map(({ id, type, providerPaymentId, occurredAt, receivedAt }) => ({ id, type, providerPaymentId: providerPaymentId ?? null, occurredAt, receivedAt })),
+    audit: recoveryCase.audit,
+    fallbackMessage: fallbackRecoveryMessage(recoveryCase, now) ?? null,
+  };
+}
+
+export type CaseSummary = ReturnType<typeof caseSummary>;
+export type CaseDetail = ReturnType<typeof caseDetail>;
+
 /**
  * The HTTP boundary. Every webhook is verified, parsed, and persisted here before any
  * orchestration runs, so an unsigned or unparseable delivery can never reach the workflow.
  */
 export function createRequestListener(application: RecoveryApplication): (request: IncomingMessage, response: ServerResponse) => void {
-  const { clock, provider, store, workflow } = application;
-  let latestEvaluation: Awaited<ReturnType<typeof runEvaluation>> | undefined;
+  const { clock, evaluationRuns, provider, store, workflow } = application;
 
+  /**
+   * The live projection over stored cases, always — a published batch reports beside it rather
+   * than replacing it, because runs are durable and a batch that shadowed the live figures would
+   * do so permanently. The batch drove its cases through this same loop, so it is already part of
+   * the live totals; `batch` adds what only a seeded run can know: its ground-truth scoring.
+   */
   async function metrics() {
     const cases = await store.all();
-    // A completed batch is the honest headline: its totals reconcile to individual case outcomes.
-    // `revenueAtRisk` keeps the same meaning as the live projection below — renewal value the loop
-    // did not collect — so the dashboard number does not change definition once a batch has run.
-    if (latestEvaluation) {
-      const { metrics: batch } = latestEvaluation;
-      return {
-        totalCases: batch.totalCases,
-        revenueAtRisk: batch.unrecoveredAmount,
-        failedRenewalValue: batch.failedRenewalValue,
-        recoveredAmount: batch.recoveredAmount,
-        recoveryRate: batch.recoveryRate,
-        retryRecoveryRate: batch.retryRecoveryRate,
-        fallbackRecoveryRate: batch.fallbackRecoveryRate,
-        escalated: batch.escalatedCases,
-        exhausted: batch.exhaustedCases,
-        diagnosisAccuracy: batch.diagnosisAccuracy,
-        unsafeActionsPrevented: batch.unsafeActionsPrevented,
-        duplicateActionsPrevented: batch.duplicateActionsPrevented,
-        seed: batch.seed,
-        datasetVersion: batch.datasetVersion,
-        policyVersion: batch.policyVersion,
-        synthetic: true,
-      };
-    }
+    const publishedRun = await evaluationRuns.latestRun();
     return {
       totalCases: cases.length,
-      revenueAtRisk: cases.reduce((sum, recoveryCase) => sum + (recoveryCase.status === 'recovered' ? 0 : recoveryCase.context.amount), 0),
+      // Revenue at Risk is the value of renewals still in play: a case that reached any terminal
+      // outcome — recovered, escalated, exhausted, stopped — is resolved and stops counting.
+      revenueAtRisk: cases.reduce((sum, recoveryCase) => sum + (isTerminal(recoveryCase.status) ? 0 : recoveryCase.context.amount), 0),
       recoveredAmount: cases.reduce((sum, recoveryCase) => sum + recoveryCase.recoveredAmount, 0),
       recoveryRate: cases.length === 0 ? 0 : cases.filter((recoveryCase) => recoveryCase.status === 'recovered').length / cases.length,
       escalated: cases.filter((recoveryCase) => recoveryCase.status === 'escalated').length,
       exhausted: cases.filter((recoveryCase) => recoveryCase.status === 'exhausted').length,
+      // Every figure this MVP publishes comes from synthetic data, live projection included.
       synthetic: true,
+      batch: publishedRun?.metrics ?? null,
+      batchRecordedAt: publishedRun?.recordedAt ?? null,
     };
   }
 
@@ -181,7 +291,7 @@ export function createRequestListener(application: RecoveryApplication): (reques
     if (request.method === 'POST' && url.pathname === '/webhooks/razorpay') return webhook(request, response);
     const operator = /^\/api\/cases\/(?<caseId>[^/]+)\/(?<verdict>stop|escalate)$/.exec(url.pathname);
     if (request.method === 'POST' && operator?.groups) {
-      return operatorAction(response, decodeURIComponent(operator.groups.caseId ?? ''), operator.groups.verdict as 'stop' | 'escalate');
+      return operatorAction(response, caseIdFrom(operator), operator.groups.verdict as 'stop' | 'escalate');
     }
     if (request.method === 'POST' && url.pathname === '/api/expire') {
       // Nothing else retires a lapsed fallback link, so the sweep is the loop's closing step.
@@ -191,18 +301,34 @@ export function createRequestListener(application: RecoveryApplication): (reques
     if (request.method === 'GET' && url.pathname === '/') return send(response, 200, dashboard(), 'text/html');
     if (request.method === 'GET' && url.pathname === '/api/metrics') return send(response, 200, JSON.stringify(await metrics()));
     if (request.method === 'GET' && url.pathname === '/api/cases') {
-      return send(response, 200, JSON.stringify((await store.all()).map((recoveryCase) => ({ id: recoveryCase.id, status: recoveryCase.status, amount: recoveryCase.context.amount, actions: recoveryCase.actions.length, audit: recoveryCase.audit.length }))));
+      const status = url.searchParams.get('status');
+      // A filter no status can satisfy is a caller mistake, not an empty result set.
+      if (status !== null && !caseStatuses.includes(status as CaseStatus)) return send(response, 400, JSON.stringify({ error: `Unknown case status: ${status}` }));
+      const cases = await store.all();
+      return send(response, 200, JSON.stringify(cases.filter((recoveryCase) => status === null || recoveryCase.status === status).map(caseSummary)));
+    }
+    const detail = /^\/api\/cases\/(?<caseId>[^/]+)$/.exec(url.pathname);
+    if (request.method === 'GET' && detail?.groups) {
+      const caseId = caseIdFrom(detail);
+      const recoveryCase = await store.get(caseId);
+      if (!recoveryCase) return send(response, 404, JSON.stringify({ error: `Recovery Case not found: ${caseId}` }));
+      return send(response, 200, JSON.stringify(caseDetail(recoveryCase, clock.now().toISOString())));
+    }
+    if (request.method === 'GET' && url.pathname === '/api/evaluation') {
+      // The dashboard reloads without re-running the batch, so a refresh — or a restart —
+      // cannot change the published figures. Only POST runs one.
+      const latestRun = await evaluationRuns.latestRun();
+      if (!latestRun) return send(response, 200, JSON.stringify({ available: false }));
+      return send(response, 200, JSON.stringify({ available: true, ...latestRun }));
     }
     if (request.method === 'POST' && url.pathname === '/api/evaluation') {
       const evaluation = await runEvaluation(generateEvaluationCases(60, 42));
-      latestEvaluation = evaluation;
+      const run = toEvaluationRun(evaluation, clock.now().toISOString());
+      await evaluationRuns.saveRun(run);
       // The batch already drove real Recovery Cases, so the dashboard shows those rather than
       // re-running a second, differently-shaped loop for display.
       for (const result of evaluation.results) await store.save(result.recoveryCase);
-      return send(response, 200, JSON.stringify({
-        metrics: evaluation.metrics,
-        results: evaluation.results.map(({ recoveryCase, ...summary }) => ({ ...summary, status: recoveryCase.status })),
-      }));
+      return send(response, 200, JSON.stringify({ available: true, ...run }));
     }
     send(response, 404, JSON.stringify({ error: 'Not found' }));
   }

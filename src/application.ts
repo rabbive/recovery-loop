@@ -2,6 +2,7 @@ import { DeterministicSimulator, FixedClock, RazorpayTestModeProvider, SystemClo
 import { createPostgresStore, type PostgresRecoveryStore } from './persistence.js';
 import { DeterministicPolicy, InMemoryRecoveryStore, RecoveryWorkflow, type RecoveryStore } from './recovery.js';
 import { AnthropicDiagnosisEngine, AnthropicMessagesModel, FixtureDiagnosisEngine, type DiagnosisEngine } from './diagnosis.js';
+import { InMemoryEvaluationRunStore, type EvaluationRunStore } from './evaluation.js';
 import type { RuntimeConfig } from './config.js';
 
 export interface RecoveryApplication {
@@ -11,6 +12,7 @@ export interface RecoveryApplication {
   readonly provider: PaymentProvider;
   readonly diagnosisEngine: DiagnosisEngine;
   readonly workflow: RecoveryWorkflow;
+  readonly evaluationRuns: EvaluationRunStore;
   readonly postgresStore?: PostgresRecoveryStore;
 }
 
@@ -20,6 +22,7 @@ export interface RecoveryApplicationOptions {
   readonly store?: RecoveryStore;
   readonly provider?: PaymentProvider;
   readonly diagnosisEngine?: DiagnosisEngine;
+  readonly evaluationRuns?: EvaluationRunStore;
 }
 
 export function createRecoveryApplication(options: RecoveryApplicationOptions): RecoveryApplication {
@@ -42,5 +45,7 @@ export function createRecoveryApplication(options: RecoveryApplicationOptions): 
       ...(options.config.diagnosisTimeoutMilliseconds === undefined ? {} : { timeoutMilliseconds: options.config.diagnosisTimeoutMilliseconds }),
     })));
   const workflow = new RecoveryWorkflow(store, provider, diagnosisEngine, new DeterministicPolicy(), clock);
-  return { config: options.config, clock, store, provider, diagnosisEngine, workflow, ...(postgresStore === undefined ? {} : { postgresStore }) };
+  // Published batch figures live wherever the cases live, so a restart shows the same numbers.
+  const evaluationRuns = options.evaluationRuns ?? postgresStore?.evaluationRuns ?? new InMemoryEvaluationRunStore();
+  return { config: options.config, clock, store, provider, diagnosisEngine, workflow, evaluationRuns, ...(postgresStore === undefined ? {} : { postgresStore }) };
 }

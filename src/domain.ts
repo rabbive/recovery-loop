@@ -77,10 +77,38 @@ export interface RecoveryAction {
   readonly result?: string;
 }
 
+/**
+ * Every kind of entry the timeline can hold. It is a union rather than a string because the
+ * counters and projections that read the timeline match these spellings: with a free-form string,
+ * renaming an emitter would silently zero a published figure and still typecheck.
+ *
+ * These strings are persisted — in `audit_events.type` and inside the `recovery_cases.state`
+ * document, which hydrates back through an unvalidated cast. Renaming one is therefore a data
+ * migration, not a type edit: rows written under the old spelling keep it, hydrate as an entry
+ * this union says cannot exist, and read as zero wherever a counter matches on the new name.
+ */
+export type AuditEventType =
+  | 'case_opened'
+  | `case_${Exclude<CaseStatus, 'at_risk' | 'diagnosed' | 'retry_scheduled' | 'fallback_link_available'>}`
+  | 'diagnosis_created'
+  | 'diagnosis_unavailable'
+  | 'policy_allowed'
+  | 'policy_blocked'
+  | 'provider_event_received'
+  | 'provider_action_result'
+  | 'retry_failed'
+  | 'retry_ineligible'
+  | 'fallback_link_expired'
+  | 'late_event_ignored'
+  | 'pre_existing_success'
+  | 'manual_stop'
+  | 'manual_escalation'
+  | 'manual_action_ignored';
+
 export interface AuditEvent {
   readonly id: string;
   readonly caseId: string;
-  readonly type: string;
+  readonly type: AuditEventType;
   readonly actor: 'system' | 'diagnosis_model' | 'policy' | 'provider' | 'operator';
   readonly at: string;
   readonly explanation: string;
@@ -120,6 +148,9 @@ const allowedTransitions: Readonly<Record<CaseStatus, readonly CaseStatus[]>> = 
   exhausted: ['exhausted', 'recovered'],
   stopped: ['stopped'],
 };
+
+/** Every status a Recovery Case can hold, derived from the transition table so the two cannot drift. */
+export const caseStatuses = Object.keys(allowedTransitions) as readonly CaseStatus[];
 
 export class InvalidCaseTransitionError extends Error {
   constructor(readonly from: CaseStatus, readonly to: CaseStatus) {
@@ -241,6 +272,17 @@ export function updateAction(
     ),
     updatedAt: now,
   };
+}
+
+/**
+ * The fallback link the case is resting on, if any, and whether the customer can still pay it.
+ * One rule, shared: policy blocks further action while a link is `live`, the workflow retires one
+ * that has lapsed, and the customer message preview offers only a link this calls live. Letting
+ * each of them decide separately is how a customer gets asked to pay a link that is not payable.
+ */
+export function fallbackLinkState(recoveryCase: RecoveryCase, now: string): { readonly action: RecoveryAction; readonly live: boolean } | undefined {
+  const action = recoveryCase.actions.find((candidate) => candidate.kind === 'fallback_link' && candidate.status !== 'failed' && candidate.expiresAt !== undefined);
+  return action === undefined ? undefined : { action, live: Date.parse(action.expiresAt ?? '') > Date.parse(now) };
 }
 
 export function markRecovered(recoveryCase: RecoveryCase, now: string): RecoveryCase {

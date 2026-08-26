@@ -26,6 +26,18 @@ describe('application scaffold', () => {
     expect(await application.store.get('scaffold-case')).toEqual(recoveryCase);
   });
 
+  it('defaults to a clock that moves, so link expiry and audit timestamps are real', () => {
+    // A frozen clock in the running app would stop every fallback link from ever lapsing and
+    // stamp every audit event with the same instant. Only tests and the seeded batch pin time.
+    const before = Date.now();
+    const { clock } = createRecoveryApplication({ config: loadConfig({ PORT: '3100' }) });
+
+    const now = clock.now().getTime();
+
+    expect(now).toBeGreaterThanOrEqual(before);
+    expect(now).toBeLessThanOrEqual(Date.now());
+  });
+
   it('uses the fixture diagnosis engine when no model credential is configured', () => {
     const application = createRecoveryApplication({ config: loadConfig({ PORT: '3000' }) });
     expect(application.diagnosisEngine).toBeInstanceOf(FixtureDiagnosisEngine);

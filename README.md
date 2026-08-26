@@ -28,6 +28,12 @@ Open `http://localhost:3000` for the local dashboard. Click **Run 60-case evalua
 
 Runtime configuration is documented in `.env.example`. Set `DATABASE_URL` to enable PostgreSQL persistence; without it, the app uses the in-memory adapter. The server initializes the schema from `src/persistence.sql`. Keep credentials outside the repository.
 
+`tests/persistence.test.ts` is the only suite that exercises the PostgreSQL adapter — everything else runs against the in-memory one — so it is skipped unless `TEST_DATABASE_URL` points at a database it may truncate:
+
+```bash
+TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5432/recovery_loop_test npm test
+```
+
 ### Payment provider contract
 
 `PaymentProvider` is the only payment seam the recovery workflow depends on: event verification, event normalization, retry eligibility, retry submission, and fallback-link creation. `tests/provider-contract.test.ts` runs the same suite against both the deterministic simulator and the Razorpay Test Mode adapter, so the two cannot drift.
@@ -73,14 +79,34 @@ An escalated or exhausted case can still transition to `recovered` if the custom
 
 ## Architecture
 
+```mermaid
+flowchart TD
+  W[Razorpay webhook] -->|verify signature, dedupe| H[HTTP boundary<br/>src/http.ts]
+  H -->|normalized event| WF[Recovery workflow<br/>src/recovery.ts]
+  WF -->|case signals, no credentials| D[Diagnosis engine<br/>src/diagnosis.ts]
+  D -->|structured recommendation| WF
+  WF -->|recommendation + case facts| P[Deterministic policy<br/>src/recovery.ts]
+  P -->|authorized action only| WF
+  WF -->|retry / fallback link| PR[Payment provider contract<br/>src/provider.ts]
+  PR --> SIM[Deterministic simulator]
+  PR --> RZP[Razorpay Test Mode]
+  WF -->|case, events, decisions, actions, audit| ST[(Store<br/>in-memory or PostgreSQL)]
+  E[Seeded evaluation<br/>src/evaluation.ts] -->|drives the same workflow| WF
+  ST --> H
+  H -->|projections| UI[Merchant dashboard]
+```
+
+The HTTP boundary uses the provider to verify and normalize a delivery, but every money-moving operation is reached only through the workflow after policy authorized it — and the diagnosis engine has no path to `src/provider.ts` at all, which is what ADR-0001 makes structural rather than procedural.
+
 - `src/domain.ts`: Recovery Case types, lifecycle, immutable renewal context, and audit helpers.
 - `src/recovery.ts`: application workflow seam, deterministic policy, store, and idempotent action execution.
 - `src/diagnosis.ts`: diagnosis engine seam, structured-output validation, and the Anthropic Messages adapter.
 - `src/provider.ts`: the payment-provider contract, the deterministic simulator, and the Razorpay Test Mode adapter.
 - `src/evaluation.ts`: the seeded 50+ case dataset, the batch runner, and reconciliation metrics.
+- `src/messaging.ts`: the customer-facing fallback message preview, with no delivery integration.
 - `src/http.ts`: the HTTP boundary — webhook ingestion, operator verdicts, dashboard, and projections.
 - `src/server.ts`: process bootstrap that binds the HTTP boundary to a port.
-- `src/persistence.sql`: PostgreSQL persistence foundation for productionizing the in-memory store.
+- `src/persistence.ts` and `src/persistence.sql`: the PostgreSQL adapter for the case store and published evaluation runs, and the schema it initializes.
 
 The workflow accepts its clock, diagnosis engine, policy, store, and provider as dependencies. Tests exercise behavior at that seam rather than private implementation details.
 
@@ -100,6 +126,21 @@ The ladder is one authorized recurring retry, then one expiring fallback link, t
 
 Actions are identified by `idempotencyKey` and stay `pending` until their result is stored, so a process that dies between the provider call and the write re-drives the same identity and the provider replays rather than charging again. `expireLapsedFallbackLink` retires a link the customer never paid — nothing else closes a case resting in `fallback_link_available` — and is exposed as `POST /api/expire`. Operators can stop or escalate a live case through `POST /api/cases/:id/stop` and `/escalate`; against a case that already reached an outcome, both record `manual_action_ignored` rather than overwriting it.
 
+### Merchant dashboard and projections
+
+The dashboard at `/` is served from the HTTP boundary and reads these projections, so anything it shows an operator is also available to a script:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/metrics` | The live projection over every stored case — revenue at risk (renewals still in play: a case that reached any terminal outcome no longer counts), recovered amount, recovery rate, escalated, exhausted — plus `batch`, the last published run's own reconciled figures and versions. A published batch reports *beside* the live figures, never instead of them: runs are durable, so a batch that shadowed the live projection would shadow it permanently. Every figure in this MVP is synthetic and labelled so. |
+| `GET /api/cases?status=` | The case list. An unknown status is a `400` rather than a silently empty list; the vocabulary comes from the aggregate's transition table. |
+| `GET /api/cases/:id` | One case in full: renewal context, diagnosis with its evidence and confidence, every policy decision and its reason, actions, attempts, events, the append-only audit timeline, and — as `fallbackMessage` — the customer message for a live fallback link, previewed as it would be sent. |
+| `GET /api/evaluation` | Replays the last published batch — ground-truth safe action and outcome beside what the loop actually did. Only `POST` publishes a new one. |
+
+The fallback message preview is a preview and nothing more: `deliverable` is always `false`, no email, SMS, WhatsApp, or voice provider is integrated, and no send happens anywhere in the MVP. It names the renewal, the unchanged amount and currency, and the provider's own link reference — never a synthesized URL, a provider payment id, or gateway failure telemetry. It offers nothing once any payment attempt has succeeded or the case has reached an outcome, which covers a renewal paid outside the loop: that case stands down to `stopped` without ever reaching `recovered`, and asking its customer to pay the link would collect the renewal twice. The link it previews is the one `fallbackLinkState` calls live — the same rule policy and the expiry sweep use — and a lapsed link is marked `expired` rather than previewed as usable.
+
+A published batch is stored through `EvaluationRunStore`, so a restart shows a merchant the same figures rather than quietly replacing them with a live projection. `Stop` and `Escalate` appear only on non-terminal cases, using the domain's own terminal-status set.
+
 ## Synthetic evaluation
 
 ```bash
@@ -110,9 +151,9 @@ node --input-type=module -e "import('./dist/src/evaluation.js').then(async ({run
 
 Each case carries ground truth — the real failure category, the action that was safe given that truth, whether it should recover revenue, and the expected outcome — beside the case rather than inside it. The workflow reads only the scripted provider deliveries, and every provider operation goes through `RecoveryWorkflow`, so the batch measures the loop the product ships. `diagnosisAccuracy` scores whichever `DiagnosisEngine` the run is given (the default predicts from the provider failure code alone, and the mislabelled archetype is one it gets wrong on purpose). `safeActionMismatches` counts the cases where the loop spent a rung ground truth calls unsafe — it may only do so when a misleading provider signal misled the diagnosis, which is what the mislabelled archetype proves.
 
-`runEvaluation` gives every case its own store, simulator, and `FixedClock` seeded from `startedAt`, so link expiry and event ordering are deterministic and repeated runs of a seed publish identical totals. The report is `{ metrics, results }`. `metrics` is labelled `synthetic` and records the seed, dataset version, policy version, and diagnosis model version alongside failed renewal value, recovered and unrecovered amount, recovery rate, retry and fallback recovery, escalation, exhaustion, stopped cases, diagnosis accuracy, and the unsafe actions, duplicate actions, duplicate deliveries, and late deliveries prevented. `results` holds one row per case with its Recovery Case, so every published total reconciles to individual case outcomes and their audit trails — a renewal collected after both rungs failed is counted as recovered revenue but reported as `recovered_unattributed` rather than credited to an action that failed.
+`runEvaluation` gives every case its own store, simulator, and `FixedClock` seeded from `startedAt`, so link expiry and event ordering are deterministic and repeated runs of a seed publish identical totals. The report is `{ metrics, results }`. `metrics` is labelled `synthetic` and records the seed, dataset version, policy version, and diagnosis model version alongside failed renewal value, recovered and unrecovered amount, recovery rate, retry and fallback recovery, escalation, exhaustion, stopped cases, diagnosis accuracy, and the unsafe actions, refused recommendations, duplicate actions, duplicate deliveries, and late deliveries prevented. `unsafeActionsPrevented` counts only charges deterministic policy refused, which is 0 at seed 42 — an honest zero, because this batch contains no case where policy had to stop a proposed charge. The two figures that used to be folded into it are reported on their own: `recommendationsRefused` (8) is policy refusing a recommendation that proposed no charge, where agreeing with a diagnosis that asked for escalation prevented nothing, and `providerIneligibleRetries` (4) is the provider reporting no chargeable mandate, after which the loop steps down a rung and the customer may still be charged through the fallback link. Neither is a charge that was stopped. `results` holds one row per case with its Recovery Case, so every published total reconciles to individual case outcomes and their audit trails — a renewal collected after both rungs failed is counted as recovered revenue but reported as `recovered_unattributed` rather than credited to an action that failed.
 
-`POST /api/evaluation` runs the same batch and persists the Recovery Cases it drove, so the dashboard shows the cases the metrics came from; its `revenueAtRisk` stays the renewal value the loop did not collect, matching the live projection.
+`POST /api/evaluation` runs the same batch, publishes the run through `EvaluationRunStore`, and persists the Recovery Cases it drove — so the batch's cases are part of the live projection rather than a parallel set of numbers, and the run keeps the ground-truth scoring only a seeded batch can know: diagnosis accuracy, unsafe actions and duplicate actions prevented, and each case's expected safe action and outcome. A published run survives a restart; `GET /api/evaluation` replays it without re-running the batch. This MVP has a single synthetic merchant, so seeded cases are the merchant's cases — nothing distinguishes a demo case from a live one, and nothing needs to.
 
 Synthetic results must not be presented as expected production performance. Razorpay credentials are optional and only used for a separately configured Test Mode integration.
 

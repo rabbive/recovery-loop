@@ -6,6 +6,7 @@ import {
   appendAudit,
   canTransition,
   createRecoveryCase,
+  fallbackLinkState,
   isTerminal,
   markRecovered,
   renewalContextViolation,
@@ -39,15 +40,6 @@ export interface Policy {
 function eventPaymentMethod(event: ProviderEvent): PaymentAttempt['method'] {
   const method = event.payload.method;
   return method === 'recurring_mandate' || method === 'upi' || method === 'card' ? method : 'card';
-}
-
-/**
- * The fallback link the case is resting on, if any, and whether the customer can still pay it.
- * Policy blocks further action while one is `live`; the workflow retires one that has `lapsed`.
- */
-function fallbackLinkState(recoveryCase: RecoveryCase, now: string): { readonly action: RecoveryAction; readonly live: boolean } | undefined {
-  const action = recoveryCase.actions.find((candidate) => candidate.kind === 'fallback_link' && candidate.status !== 'failed' && candidate.expiresAt !== undefined);
-  return action === undefined ? undefined : { action, live: Date.parse(action.expiresAt ?? '') > Date.parse(now) };
 }
 
 export class DeterministicPolicy implements Policy {

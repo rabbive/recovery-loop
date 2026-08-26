@@ -4,6 +4,7 @@ import type { NormalizedEventInput } from './provider.js';
 import { caseStatuses, isTerminal, terminalStatuses, type CaseStatus, type RecoveryCase } from './domain.js';
 import { fallbackRecoveryMessage } from './messaging.js';
 import { generateEvaluationCases, runEvaluation, toEvaluationRun } from './evaluation.js';
+import { labScenarios, type LabScenario } from './lab.js';
 
 function send(response: ServerResponse, status: number, body: string, contentType = 'application/json'): void {
   response.writeHead(status, { 'content-type': `${contentType}; charset=utf-8`, 'cache-control': 'no-store' });
@@ -26,6 +27,10 @@ code{background:#eef2ff;padding:2px 4px;border-radius:4px}.muted{color:#64748b}.
 .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;background:#eef2ff;color:#155eef}.pill.no{background:#fef3f2;color:#b42318}
 ul{margin:6px 0;padding-left:20px}li{font-size:14px}.timeline li{margin-bottom:6px}
 pre.preview{background:#f8fafc;border:1px solid #e5e7eb;border-radius:8px;padding:12px;white-space:pre-wrap;font:14px system-ui;margin:6px 0}
+.step{border-left:3px solid #cbd5e1;padding:8px 12px;margin:8px 0;background:#f8fafc}
+.step.pass{border-left-color:#12b76a}.step.fail{border-left-color:#f04438}
+.step .what{font-size:14px}.step .got{font-size:13px;color:#475569;margin-top:4px}
+.scenario{border:1px solid #e5e7eb;border-radius:8px;padding:14px;margin:10px 0}.scenario h3{margin:0 0 4px;font-size:15px}
 </style></head>
 <body><main><h1>Recovery Loop</h1><p class="muted">Synthetic recovery control plane · AI recommends, deterministic policy authorizes.</p>
 <div class="row"><button id="run">Run 60-case evaluation</button><label class="muted">Status
@@ -36,6 +41,10 @@ pre.preview{background:#f8fafc;border:1px solid #e5e7eb;border-radius:8px;paddin
 <table><thead><tr><th>Case</th><th>Customer</th><th>Status</th><th>Failure</th><th>Amount</th><th>Recovered</th><th>Actions</th><th>Audit</th><th>Updated</th></tr></thead><tbody id="cases"></tbody></table>
 <h2>Case detail</h2><div class="panel" id="detail"><span class="muted">No case selected.</span></div>
 <h2>Evaluation run</h2><div class="panel" id="evaluation"><span class="muted">No batch has run yet.</span></div>
+<h2>Webhook replay lab</h2>
+<p class="muted">Signed synthetic deliveries sent to the same <code>POST /webhooks/razorpay</code> a provider would use. Nothing here bypasses signature verification.</p>
+<div class="row"><button id="replay">Replay all scenarios</button><span class="muted" id="labnote"></span></div>
+<div class="panel" id="lab"><span class="muted">Not run yet.</span></div>
 </main>
 <script>
 const TERMINAL=${JSON.stringify([...terminalStatuses])};
@@ -90,6 +99,47 @@ function renderEvaluation(batch){
 async function refresh(){const [m,c,b]=await Promise.all([get('/api/metrics'),get(listUrl()),get('/api/evaluation')]);renderMetrics(m);renderCases(c);renderEvaluation(b)}
 document.querySelector('#filter').onchange=refresh;
 document.querySelector('#run').onclick=async()=>{await fetch('/api/evaluation',{method:'POST'});await refresh()};
+
+// The lab signs each body, then delivers it to the real webhook route and reports what came back.
+async function deliver(payload,tamper){
+  const raw=JSON.stringify(payload);
+  const signed=await fetch('/api/lab/sign',{method:'POST',headers:{'content-type':'application/json'},body:raw});
+  if(!signed.ok)return{status:signed.status,body:{error:'The replay lab is unavailable on this instance.'}};
+  const {signature}=await signed.json();
+  // Tampering alters the delivered bytes only, so the signature still belongs to the original body.
+  const sent=tamper?raw.slice(0,-1)+',"injected":true}':raw;
+  const response=await fetch('/webhooks/razorpay',{method:'POST',headers:{'content-type':'application/json','x-razorpay-signature':signature},body:sent});
+  let body={};try{body=await response.json()}catch(e){}
+  return{status:response.status,body:body};
+}
+
+async function replay(){
+  const panel=document.querySelector('#lab');
+  const note=document.querySelector('#labnote');
+  panel.innerHTML='<span class="muted">Delivering…</span>';
+  note.textContent='';
+  const scenarios=await get('/api/lab/scenarios?run='+Date.now().toString(36));
+  if(!Array.isArray(scenarios)){panel.innerHTML='<span class="muted">The replay lab is available only in simulator mode.</span>';return}
+  const blocks=[];
+  let passed=0,total=0;
+  for(const scenario of scenarios){
+    const steps=[];
+    for(const step of scenario.steps){
+      const result=await deliver(step.payload,step.tamper===true);
+      const ok=result.status===step.expectStatus;
+      total++;if(ok)passed++;
+      steps.push('<div class="step '+(ok?'pass':'fail')+'"><div class="what"><strong>'+esc(step.label)+'</strong> — '+esc(step.expect)+'</div>'+
+        '<div class="got">HTTP '+result.status+' (expected '+step.expectStatus+') · '+esc(JSON.stringify(result.body))+'</div></div>');
+    }
+    blocks.push('<div class="scenario"><h3>'+esc(scenario.title)+'</h3><p class="muted">'+esc(scenario.description)+'</p>'+
+      '<p class="muted">Case <code>'+esc(scenario.caseId)+'</code></p>'+steps.join('')+'</div>');
+  }
+  panel.innerHTML=blocks.join('');
+  note.textContent=passed+' of '+total+' deliveries behaved as declared.';
+  // The lab drove real cases, so the list and metrics above must reflect them.
+  await refresh();
+}
+document.querySelector('#replay').onclick=replay;
 refresh();
 </script></body></html>`;
 }
@@ -313,6 +363,28 @@ export function createRequestListener(application: RecoveryApplication): (reques
       const recoveryCase = await store.get(caseId);
       if (!recoveryCase) return send(response, 404, JSON.stringify({ error: `Recovery Case not found: ${caseId}` }));
       return send(response, 200, JSON.stringify(caseDetail(recoveryCase, clock.now().toISOString())));
+    }
+    // The replay lab exists only when the provider can sign a delivery. The Razorpay adapter
+    // deliberately cannot, so an instance holding real credentials serves no signing endpoint.
+    if (url.pathname === '/api/lab/scenarios' || url.pathname === '/api/lab/sign') {
+      if (typeof provider.signEvent !== 'function') return send(response, 404, JSON.stringify({ error: 'The replay lab is available only in simulator mode' }));
+    }
+    if (request.method === 'GET' && url.pathname === '/api/lab/scenarios') {
+      const runId = url.searchParams.get('run')?.trim() || String(Date.parse(clock.now().toISOString()));
+      return send(response, 200, JSON.stringify(labScenarios(runId, clock.now().toISOString()) as LabScenario[]));
+    }
+    if (request.method === 'POST' && url.pathname === '/api/lab/sign') {
+      let raw: string;
+      try {
+        raw = await readBody(request);
+      } catch (error) {
+        return send(response, 413, JSON.stringify({ error: String(error) }));
+      }
+      // Sign exactly the bytes the caller will deliver, so the lab proves the real signature check
+      // rather than a re-serialized approximation of it.
+      const sign = provider.signEvent;
+      if (typeof sign !== 'function') return send(response, 404, JSON.stringify({ error: 'The replay lab is available only in simulator mode' }));
+      return send(response, 200, JSON.stringify({ signature: sign.call(provider, raw) }));
     }
     if (request.method === 'GET' && url.pathname === '/api/evaluation') {
       // The dashboard reloads without re-running the batch, so a refresh — or a restart —

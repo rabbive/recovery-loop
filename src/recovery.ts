@@ -24,7 +24,7 @@ import {
 import type { Clock, PaymentProvider } from './provider.js';
 import { DiagnosisUnavailableError as DiagnosisFailure, type DiagnosisEngine as Engine } from './diagnosis.js';
 
-export { AnthropicDiagnosisEngine, DiagnosisUnavailableError, FixtureDiagnosisEngine, type DiagnosisEngine } from './diagnosis.js';
+export { AnthropicDiagnosisEngine, DiagnosisUnavailableError, FixtureDiagnosisEngine, ModelDiagnosisEngine, OpenAICompatibleChatModel, type DiagnosisEngine } from './diagnosis.js';
 
 /** The version stamped on every policy decision. Reported with evaluation results so a batch is reproducible. */
 export const POLICY_VERSION = 'policy-v1';

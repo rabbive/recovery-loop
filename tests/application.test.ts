@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '../src/config.js';
 import { createRecoveryApplication } from '../src/application.js';
 import { FixedClock } from '../src/provider.js';
-import { AnthropicDiagnosisEngine, FixtureDiagnosisEngine } from '../src/diagnosis.js';
+import { AnthropicDiagnosisEngine, FixtureDiagnosisEngine, ModelDiagnosisEngine } from '../src/diagnosis.js';
 import { addAttempt, createRecoveryCase } from '../src/domain.js';
 
 const context = {
@@ -50,6 +50,22 @@ describe('application scaffold', () => {
     expect(createRecoveryApplication({ config }).diagnosisEngine).toBeInstanceOf(AnthropicDiagnosisEngine);
   });
 
+  it('uses Pincc ahead of Anthropic when Pincc credentials are configured', () => {
+    const config = loadConfig({
+      PORT: '3000',
+      PINCC_API_KEY: 'pincc-key',
+      PINCC_MODEL: 'tool-capable-model',
+      PINCC_BASE_URL: 'https://v2.pincc.ai/',
+      ANTHROPIC_API_KEY: 'anthropic-key',
+    });
+
+    expect(config.pinccApiKey).toBe('pincc-key');
+    expect(config.pinccModel).toBe('tool-capable-model');
+    expect(config.pinccBaseUrl).toBe('https://v2.pincc.ai');
+    expect(createRecoveryApplication({ config }).diagnosisEngine).toBeInstanceOf(ModelDiagnosisEngine);
+    expect(createRecoveryApplication({ config }).diagnosisEngine).not.toBeInstanceOf(AnthropicDiagnosisEngine);
+  });
+
   it('wires the Razorpay adapter with its webhook secret and the injected clock', async () => {
     const config = loadConfig({ PORT: '3000', RAZORPAY_KEY_ID: 'rzp_test_key', RAZORPAY_KEY_SECRET: 'test_secret', RAZORPAY_WEBHOOK_SECRET: 'hook_secret' });
     const application = createRecoveryApplication({ config, clock: new FixedClock('2026-01-01T00:00:00.000Z') });
@@ -69,5 +85,7 @@ describe('application scaffold', () => {
   it('rejects invalid ports and incomplete provider credentials', () => {
     expect(() => loadConfig({ PORT: 'not-a-port' })).toThrow(/PORT/);
     expect(() => loadConfig({ PORT: '3000', RAZORPAY_KEY_ID: 'key' })).toThrow(/configured together/);
+    expect(() => loadConfig({ PORT: '3000', PINCC_API_KEY: 'pincc-key' })).toThrow(/PINCC_MODEL/);
+    expect(() => loadConfig({ PORT: '3000', PINCC_API_KEY: 'pincc-key', PINCC_MODEL: 'model', PINCC_BASE_URL: 'http://v2.pincc.ai' })).toThrow(/HTTPS/);
   });
 });

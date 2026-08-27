@@ -75,7 +75,9 @@ Retry eligibility comes from the provider, not from the recommendation. Policy m
 
 ### AI diagnosis
 
-Set `ANTHROPIC_API_KEY` to use the model-backed diagnosis engine (`ANTHROPIC_MODEL` defaults to `claude-sonnet-5`, `DIAGNOSIS_TIMEOUT_MS` to 15000). Without the key, the app uses the deterministic fixture engine so the demo and the seeded evaluation stay reproducible.
+Set `PINCC_API_KEY` and `PINCC_MODEL` to use Pincc's OpenAI-compatible gateway for live diagnosis. `PINCC_BASE_URL` defaults to `https://v2.pincc.ai`; the adapter sends Bearer authentication to `/v1/chat/completions` and forces the existing `record_diagnosis` function schema. If Pincc is not configured, `ANTHROPIC_API_KEY` keeps the direct Anthropic Messages adapter available (`ANTHROPIC_MODEL` defaults to `claude-sonnet-5`). Without either credential, the app uses the deterministic fixture engine. `DIAGNOSIS_TIMEOUT_MS` defaults to 15000.
+
+When both Pincc and Anthropic credentials are configured, Pincc takes precedence. The seeded evaluation always uses fixtures, so gateway choice never changes the published batch metrics.
 
 The model receives only projected case signals — event ids, event types, timestamps, payment method, failure codes, amount, currency, and prior action counts. Raw provider payloads, card data, and provider credentials are never sent. Output is forced through the `record_diagnosis` tool and validated before use. An unsupported failure category, a confidence outside 0..1, missing evidence, evidence that cites no signal on the case, or a rejected request raises a terminal `DiagnosisUnavailableError` and the case is escalated to a human. A timeout, HTTP 429, HTTP 5xx, or transport error raises a retryable one: `runDiagnosis` re-attempts up to three times within the run and escalates if every attempt fails, so a case never stalls without a diagnosis. Attempts back off — honouring the provider's `retry-after` when present, otherwise 1s × attempt — through an injected `sleep` seam that tests replace with a no-op. Every failed attempt appends a `diagnosis_unavailable` audit event, and no money action occurs on any of these paths. A case with no diagnosis authorizes nothing.
 
@@ -108,7 +110,7 @@ The HTTP boundary uses the provider to verify and normalize a delivery, but ever
 
 - `src/domain.ts`: Recovery Case types, lifecycle, immutable renewal context, and audit helpers.
 - `src/recovery.ts`: application workflow seam, deterministic policy, store, and idempotent action execution.
-- `src/diagnosis.ts`: diagnosis engine seam, structured-output validation, and the Anthropic Messages adapter.
+- `src/diagnosis.ts`: diagnosis engine seam, structured-output validation, and Pincc/OpenAI-compatible plus Anthropic transport adapters.
 - `src/provider.ts`: the payment-provider contract, the deterministic simulator, and the Razorpay Test Mode adapter.
 - `src/evaluation.ts`: the seeded 50+ case dataset, the batch runner, and reconciliation metrics.
 - `src/messaging.ts`: the customer-facing fallback message preview, with no delivery integration.
@@ -176,8 +178,8 @@ deterministic simulator — which is what the published batch figures are built 
 replay lab available, since the lab's signing endpoint exists only when the provider can sign
 (see `signEvent` in `src/provider.ts`). A credentialled instance serves no lab.
 
-`ANTHROPIC_API_KEY` is optional. Unset, the app runs `FixtureDiagnosisEngine`; the seeded batch
-always uses fixtures either way, so a key never changes the published metrics.
+`PINCC_API_KEY` is optional and requires `PINCC_MODEL`; when set, live cases use Pincc. `ANTHROPIC_API_KEY`
+remains a fallback. The seeded batch always uses fixtures, so gateway credentials never change its metrics.
 
 `render.yaml` is kept as a working alternative host definition, not the deployed target.
 

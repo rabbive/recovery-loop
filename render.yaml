@@ -24,7 +24,13 @@ services:
       # The app requires Node 22 (see `engines` in package.json).
       - key: NODE_VERSION
         value: "22"
-      # Set in the Render dashboard to run model-backed diagnosis instead of the fixture engine.
-      # The seeded batch always uses fixtures, so this never changes the published figures.
-      - key: ANTHROPIC_API_KEY
+      # Set in the Render dashboard to run Pincc-backed live diagnosis. The seeded batch always
+      # uses fixtures, so this never changes the published figures.
+      - key: PINCC_API_KEY
         sync: false
+      - key: PINCC_MODEL
+        value: gpt-5.4
+      - key: PINCC_BASE_URL
+        value: https://v2.pincc.ai
+      - key: DIAGNOSIS_TIMEOUT_MS
+        value: "30000"

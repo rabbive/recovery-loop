@@ -140,7 +140,7 @@ export interface DiagnosisModel {
   infer(request: DiagnosisRequest): Promise<unknown>;
 }
 
-export class AnthropicDiagnosisEngine implements DiagnosisEngine {
+export class ModelDiagnosisEngine implements DiagnosisEngine {
   constructor(private readonly model: DiagnosisModel) {}
 
   async diagnose(recoveryCase: RecoveryCase): Promise<Diagnosis> {
@@ -155,12 +155,15 @@ export class AnthropicDiagnosisEngine implements DiagnosisEngine {
     }
     const diagnosis = parseDiagnosis(raw, this.model.version);
     const knownSignals = new Set(request.signals.map((signal) => signal.id));
-    if (!diagnosis.evidence.some((reference) => knownSignals.has(reference))) {
-      throw new DiagnosisUnavailableError('evidence does not reference any signal on this case');
+    if (!diagnosis.evidence.every((reference) => knownSignals.has(reference))) {
+      throw new DiagnosisUnavailableError('evidence references a signal that is not on this case');
     }
     return diagnosis;
   }
 }
+
+/** Backwards-compatible name for the Anthropic transport composition. */
+export class AnthropicDiagnosisEngine extends ModelDiagnosisEngine {}
 
 export const DIAGNOSIS_TOOL = {
   name: 'record_diagnosis',
@@ -232,6 +235,97 @@ export class AnthropicMessagesModel implements DiagnosisModel {
       const toolUse = body.content?.find((block) => block.type === 'tool_use' && block.name === DIAGNOSIS_TOOL.name);
       if (!toolUse) throw new DiagnosisUnavailableError('model did not return a record_diagnosis tool call');
       return toolUse.input;
+    } catch (error) {
+      if (error instanceof DiagnosisUnavailableError) throw error;
+      const aborted = controller.signal.aborted;
+      throw new DiagnosisUnavailableError(aborted ? `model call timed out after ${this.timeoutMilliseconds}ms` : `model transport failed: ${error instanceof Error ? error.message : String(error)}`, { retryable: true });
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+export interface OpenAICompatibleModelOptions {
+  readonly apiKey: string;
+  readonly baseUrl: string;
+  readonly model: string;
+  readonly timeoutMilliseconds?: number;
+  readonly fetchImplementation?: typeof fetch;
+}
+
+/** Calls an OpenAI-compatible Chat Completions API with one forced diagnosis function. */
+export class OpenAICompatibleChatModel implements DiagnosisModel {
+  readonly version: string;
+  private readonly apiKey: string;
+  private readonly baseUrl: string;
+  private readonly timeoutMilliseconds: number;
+  private readonly fetchImplementation: typeof fetch;
+
+  constructor(options: OpenAICompatibleModelOptions) {
+    this.version = options.model;
+    this.apiKey = options.apiKey;
+    this.baseUrl = options.baseUrl.replace(/\/+$/, '');
+    this.timeoutMilliseconds = options.timeoutMilliseconds ?? 15_000;
+    this.fetchImplementation = options.fetchImplementation ?? fetch;
+  }
+
+  async infer(request: DiagnosisRequest): Promise<unknown> {
+    const { system, instruction, ...signals } = request;
+    const evidence = DIAGNOSIS_TOOL.input_schema.properties.evidence;
+    const parameters = {
+      ...DIAGNOSIS_TOOL.input_schema,
+      properties: {
+        ...DIAGNOSIS_TOOL.input_schema.properties,
+        evidence: {
+          ...evidence,
+          items: { ...evidence.items, enum: request.signals.map((signal) => signal.id) },
+        },
+      },
+    };
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMilliseconds);
+    try {
+      const response = await this.fetchImplementation(`${this.baseUrl}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${this.apiKey}` },
+        signal: controller.signal,
+        body: JSON.stringify({
+          model: this.version,
+          messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: `${instruction}\n\n${JSON.stringify(signals, null, 2)}` },
+          ],
+          tools: [{
+            type: 'function',
+            function: {
+              name: DIAGNOSIS_TOOL.name,
+              description: DIAGNOSIS_TOOL.description,
+              parameters,
+            },
+          }],
+          // Pincc's gateway uses a top-level name here instead of OpenAI's nested function.name.
+          tool_choice: { type: 'function', name: DIAGNOSIS_TOOL.name },
+        }),
+      });
+      if (!response.ok) {
+        const retryAfterSeconds = Number(response.headers.get('retry-after'));
+        throw new DiagnosisUnavailableError(`model returned HTTP ${response.status}`, {
+          retryable: response.status === 429 || response.status >= 500,
+          ...(Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 ? { retryAfterMilliseconds: Math.round(retryAfterSeconds * 1000) } : {}),
+        });
+      }
+      const body = await response.json() as {
+        choices?: readonly { message?: { tool_calls?: readonly { function?: { name?: string; arguments?: string } }[] } }[];
+      };
+      const toolCall = body.choices?.flatMap((choice) => choice.message?.tool_calls ?? [])
+        .find((call) => call.function?.name === DIAGNOSIS_TOOL.name);
+      const argumentsJson = toolCall?.function?.arguments;
+      if (typeof argumentsJson !== 'string') throw new DiagnosisUnavailableError('model did not return a record_diagnosis function call');
+      try {
+        return JSON.parse(argumentsJson) as unknown;
+      } catch {
+        throw new DiagnosisUnavailableError('model returned malformed record_diagnosis function arguments');
+      }
     } catch (error) {
       if (error instanceof DiagnosisUnavailableError) throw error;
       const aborted = controller.signal.aborted;

@@ -385,6 +385,38 @@ describe('dashboard demo path', () => {
       expect(html).toContain(fragment);
     }
   });
+
+  it('serves the dashboard with the minimal shadcn-style visual primitives', async () => {
+    const html = await fetch(origin).then((response) => response.text());
+
+    for (const fragment of ['data-shell', 'data-card', 'data-badge', 'data-table-wrap', 'data-section-heading']) {
+      expect(html).toContain(fragment);
+    }
+  });
+
+  it('serves a persisted accessible theme toggle', async () => {
+    const html = await fetch(origin).then((response) => response.text());
+
+    for (const fragment of ['data-theme-toggle', 'aria-pressed', 'localStorage', 'data-theme="dark"']) {
+      expect(html).toContain(fragment);
+    }
+  });
+
+  it('uses high-contrast dark success and danger badges', async () => {
+    const html = await fetch(origin).then((response) => response.text());
+
+    for (const fragment of ['--success-bg:#166534', '--danger-bg:#991b1b', ':root[data-theme="dark"] .badge-success,:root[data-theme="dark"] .badge-danger{border-color:#fff;color:#fff}', '--primary-muted:#64748b', '.button-meta{color:var(--primary-muted)']) {
+      expect(html).toContain(fragment);
+    }
+  });
+
+  it('serves native buttons for opening recovery cases from either table', async () => {
+    const html = await fetch(origin).then((response) => response.text());
+
+    for (const fragment of ['class="case-link"', 'aria-label="Open recovery case ', "querySelectorAll('button.case-link')"]) {
+      expect(html).toContain(fragment);
+    }
+  });
 });
 
 describe('fallback message preview', () => {

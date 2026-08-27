@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AnthropicDiagnosisEngine, AnthropicMessagesModel, DiagnosisUnavailableError, buildDiagnosisRequest, parseDiagnosis, type DiagnosisModel } from '../src/diagnosis.js';
+import { AnthropicDiagnosisEngine, AnthropicMessagesModel, DiagnosisUnavailableError, OpenAICompatibleChatModel, buildDiagnosisRequest, parseDiagnosis, type DiagnosisModel } from '../src/diagnosis.js';
 import { addAttempt, addProviderEvent, createRecoveryCase } from '../src/domain.js';
 
 function caseWithFailure() {
@@ -112,6 +112,26 @@ describe('AnthropicDiagnosisEngine', () => {
     await expect(new AnthropicDiagnosisEngine(model).diagnose(caseWithFailure())).rejects.toBeInstanceOf(DiagnosisUnavailableError);
   });
 
+  it('fails safe when any cited evidence id is not on the case', async () => {
+    const model: DiagnosisModel = {
+      version: 'tool-capable-model',
+      async infer() {
+        return {
+          failureCategory: 'transient',
+          confidence: 0.88,
+          evidence: ['event-1', 'invented-event'],
+          recommendedAction: 'retry',
+          explanation: 'One real signal does not make an invented citation trustworthy.',
+        };
+      },
+    };
+
+    await expect(new AnthropicDiagnosisEngine(model).diagnose(caseWithFailure())).rejects.toMatchObject({
+      name: 'DiagnosisUnavailableError',
+      retryable: false,
+    });
+  });
+
   it('fails safe when the model call throws', async () => {
     const model: DiagnosisModel = {
       version: 'claude-sonnet-5',
@@ -182,6 +202,98 @@ describe('AnthropicMessagesModel', () => {
       init.signal?.addEventListener('abort', () => reject(new Error('aborted')));
     }), { timeoutMilliseconds: 10 });
     await expect(instance.infer(buildDiagnosisRequest(caseWithFailure()))).rejects.toMatchObject({ name: 'DiagnosisUnavailableError', retryable: true });
+  });
+});
+
+describe('OpenAICompatibleChatModel', () => {
+  function model(handler: (url: string, init: RequestInit) => Response | Promise<Response>, options: Record<string, unknown> = {}) {
+    const calls: { url: string; init: RequestInit }[] = [];
+    const fetchImplementation = (async (url: string | URL | Request, init?: RequestInit) => {
+      const record = { url: String(url), init: init ?? {} };
+      calls.push(record);
+      return handler(record.url, record.init);
+    }) as unknown as typeof fetch;
+    return {
+      calls,
+      instance: new OpenAICompatibleChatModel({
+        apiKey: 'pincc-test-key',
+        baseUrl: 'https://v2.pincc.ai',
+        model: 'tool-capable-model',
+        fetchImplementation,
+        ...options,
+      }),
+    };
+  }
+
+  const validOutput = { failureCategory: 'transient', confidence: 0.8, evidence: ['event-1'], recommendedAction: 'retry', explanation: 'ok' };
+
+  function toolCallResponse(input: unknown): Response {
+    return new Response(JSON.stringify({
+      id: 'chatcmpl_test',
+      object: 'chat.completion',
+      created: 1,
+      model: 'tool-capable-model',
+      choices: [{
+        index: 0,
+        finish_reason: 'tool_calls',
+        message: {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'record_diagnosis', arguments: JSON.stringify(input) } }],
+        },
+      }],
+      usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 },
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }
+
+  it('forces the diagnosis function through the OpenAI-compatible chat completions contract', async () => {
+    const { calls, instance } = model(() => toolCallResponse(validOutput));
+
+    const result = await instance.infer(buildDiagnosisRequest(caseWithFailure()));
+
+    expect(result).toEqual(validOutput);
+    expect(calls[0]?.url).toBe('https://v2.pincc.ai/v1/chat/completions');
+    const headers = calls[0]?.init.headers as Record<string, string>;
+    expect(headers.authorization).toBe('Bearer pincc-test-key');
+    const body = JSON.parse(String(calls[0]?.init.body)) as {
+      model: string;
+      messages: readonly { role: string; content: string }[];
+      tools: readonly {
+        type: string;
+        function: {
+          name: string;
+          parameters: { properties: { evidence: { items: { enum: readonly string[] } } } };
+        };
+      }[];
+      tool_choice: unknown;
+    };
+    expect(body.model).toBe('tool-capable-model');
+    expect(body.messages.map((message) => message.role)).toEqual(['system', 'user']);
+    expect(body.tools[0]).toMatchObject({ type: 'function', function: { name: 'record_diagnosis' } });
+    expect(body.tool_choice).toEqual({ type: 'function', name: 'record_diagnosis' });
+    expect(body.tools[0]?.function.parameters.properties.evidence.items.enum).toEqual(['event-1', 'case-1:attempt:1']);
+    expect(String(calls[0]?.init.body)).not.toContain('4111111111111111');
+  });
+
+  it('fails safe when the gateway returns malformed function arguments', async () => {
+    const { instance } = model(() => new Response(JSON.stringify({
+      choices: [{ message: { tool_calls: [{ type: 'function', function: { name: 'record_diagnosis', arguments: '{not-json' } }] } }],
+    }), { status: 200 }));
+
+    await expect(instance.infer(buildDiagnosisRequest(caseWithFailure()))).rejects.toMatchObject({
+      name: 'DiagnosisUnavailableError',
+      retryable: false,
+    });
+  });
+
+  it('preserves retry guidance from a rate-limited gateway response', async () => {
+    const { instance } = model(() => new Response('rate limited', { status: 429, headers: { 'retry-after': '3' } }));
+
+    await expect(instance.infer(buildDiagnosisRequest(caseWithFailure()))).rejects.toMatchObject({
+      name: 'DiagnosisUnavailableError',
+      retryable: true,
+      retryAfterMilliseconds: 3000,
+    });
   });
 });
 

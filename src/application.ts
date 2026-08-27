@@ -1,7 +1,7 @@
 import { DeterministicSimulator, FixedClock, RazorpayTestModeProvider, SystemClock, type Clock, type PaymentProvider } from './provider.js';
 import { createPostgresStore, type PostgresRecoveryStore } from './persistence.js';
 import { DeterministicPolicy, InMemoryRecoveryStore, RecoveryWorkflow, type RecoveryStore } from './recovery.js';
-import { AnthropicDiagnosisEngine, AnthropicMessagesModel, FixtureDiagnosisEngine, type DiagnosisEngine } from './diagnosis.js';
+import { AnthropicDiagnosisEngine, AnthropicMessagesModel, FixtureDiagnosisEngine, ModelDiagnosisEngine, OpenAICompatibleChatModel, type DiagnosisEngine } from './diagnosis.js';
 import { InMemoryEvaluationRunStore, type EvaluationRunStore } from './evaluation.js';
 import type { RuntimeConfig } from './config.js';
 
@@ -37,13 +37,20 @@ export function createRecoveryApplication(options: RecoveryApplicationOptions): 
       ...(options.config.razorpayWebhookSecret === undefined ? {} : { webhookSecret: options.config.razorpayWebhookSecret }),
       clock,
     }));
-  const diagnosisEngine = options.diagnosisEngine ?? (options.config.anthropicApiKey === undefined
-    ? new FixtureDiagnosisEngine()
-    : new AnthropicDiagnosisEngine(new AnthropicMessagesModel({
-      apiKey: options.config.anthropicApiKey,
-      ...(options.config.anthropicModel === undefined ? {} : { model: options.config.anthropicModel }),
+  const diagnosisEngine = options.diagnosisEngine ?? (options.config.pinccApiKey !== undefined
+    ? new ModelDiagnosisEngine(new OpenAICompatibleChatModel({
+      apiKey: options.config.pinccApiKey,
+      baseUrl: options.config.pinccBaseUrl ?? 'https://v2.pincc.ai',
+      model: options.config.pinccModel ?? '',
       ...(options.config.diagnosisTimeoutMilliseconds === undefined ? {} : { timeoutMilliseconds: options.config.diagnosisTimeoutMilliseconds }),
-    })));
+    }))
+    : options.config.anthropicApiKey === undefined
+      ? new FixtureDiagnosisEngine()
+      : new AnthropicDiagnosisEngine(new AnthropicMessagesModel({
+        apiKey: options.config.anthropicApiKey,
+        ...(options.config.anthropicModel === undefined ? {} : { model: options.config.anthropicModel }),
+        ...(options.config.diagnosisTimeoutMilliseconds === undefined ? {} : { timeoutMilliseconds: options.config.diagnosisTimeoutMilliseconds }),
+      })));
   const workflow = new RecoveryWorkflow(store, provider, diagnosisEngine, new DeterministicPolicy(), clock);
   // Published batch figures live wherever the cases live, so a restart shows the same numbers.
   const evaluationRuns = options.evaluationRuns ?? postgresStore?.evaluationRuns ?? new InMemoryEvaluationRunStore();

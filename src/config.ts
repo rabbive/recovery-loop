@@ -6,6 +6,9 @@ export interface RuntimeConfig {
   readonly razorpayWebhookSecret?: string;
   readonly anthropicApiKey?: string;
   readonly anthropicModel?: string;
+  readonly pinccApiKey?: string;
+  readonly pinccBaseUrl?: string;
+  readonly pinccModel?: string;
   readonly diagnosisTimeoutMilliseconds?: number;
 }
 
@@ -21,6 +24,20 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Runtim
   const razorpayWebhookSecret = environment.RAZORPAY_WEBHOOK_SECRET?.trim() || undefined;
   const anthropicApiKey = environment.ANTHROPIC_API_KEY?.trim() || undefined;
   const anthropicModel = environment.ANTHROPIC_MODEL?.trim() || undefined;
+  const pinccApiKey = environment.PINCC_API_KEY?.trim() || undefined;
+  const pinccModel = environment.PINCC_MODEL?.trim() || undefined;
+  if ((pinccApiKey === undefined) !== (pinccModel === undefined)) throw new Error('PINCC_API_KEY and PINCC_MODEL must be configured together');
+  const rawPinccBaseUrl = environment.PINCC_BASE_URL?.trim() || undefined;
+  const pinccBaseUrl = rawPinccBaseUrl?.replace(/\/+$/, '');
+  if (pinccBaseUrl !== undefined) {
+    let parsed: URL;
+    try {
+      parsed = new URL(pinccBaseUrl);
+    } catch {
+      throw new Error(`PINCC_BASE_URL must be a valid HTTPS URL: ${rawPinccBaseUrl}`);
+    }
+    if (parsed.protocol !== 'https:') throw new Error(`PINCC_BASE_URL must be a valid HTTPS URL: ${rawPinccBaseUrl}`);
+  }
   const rawTimeout = environment.DIAGNOSIS_TIMEOUT_MS?.trim() || undefined;
   let diagnosisTimeoutMilliseconds: number | undefined;
   if (rawTimeout !== undefined) {
@@ -35,6 +52,9 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Runtim
     ...(razorpayWebhookSecret === undefined ? {} : { razorpayWebhookSecret }),
     ...(anthropicApiKey === undefined ? {} : { anthropicApiKey }),
     ...(anthropicModel === undefined ? {} : { anthropicModel }),
+    ...(pinccApiKey === undefined ? {} : { pinccApiKey }),
+    ...(pinccBaseUrl === undefined ? {} : { pinccBaseUrl }),
+    ...(pinccModel === undefined ? {} : { pinccModel }),
     ...(diagnosisTimeoutMilliseconds === undefined ? {} : { diagnosisTimeoutMilliseconds }),
   };
 }

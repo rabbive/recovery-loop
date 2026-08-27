@@ -38,12 +38,19 @@ export function createRecoveryApplication(options: RecoveryApplicationOptions): 
       clock,
     }));
   const diagnosisEngine = options.diagnosisEngine ?? (options.config.pinccApiKey !== undefined
-    ? new ModelDiagnosisEngine(new OpenAICompatibleChatModel({
-      apiKey: options.config.pinccApiKey,
-      baseUrl: options.config.pinccBaseUrl ?? 'https://v2.pincc.ai',
-      model: options.config.pinccModel ?? '',
-      ...(options.config.diagnosisTimeoutMilliseconds === undefined ? {} : { timeoutMilliseconds: options.config.diagnosisTimeoutMilliseconds }),
-    }))
+    ? new ModelDiagnosisEngine((options.config.pinccModel ?? '').startsWith('claude-')
+      ? new AnthropicMessagesModel({
+        apiKey: options.config.pinccApiKey,
+        baseUrl: options.config.pinccBaseUrl ?? 'https://v2.pincc.ai',
+        model: options.config.pinccModel ?? '',
+        ...(options.config.diagnosisTimeoutMilliseconds === undefined ? {} : { timeoutMilliseconds: options.config.diagnosisTimeoutMilliseconds }),
+      })
+      : new OpenAICompatibleChatModel({
+        apiKey: options.config.pinccApiKey,
+        baseUrl: options.config.pinccBaseUrl ?? 'https://v2.pincc.ai',
+        model: options.config.pinccModel ?? '',
+        ...(options.config.diagnosisTimeoutMilliseconds === undefined ? {} : { timeoutMilliseconds: options.config.diagnosisTimeoutMilliseconds }),
+      }))
     : options.config.anthropicApiKey === undefined
       ? new FixtureDiagnosisEngine()
       : new AnthropicDiagnosisEngine(new AnthropicMessagesModel({

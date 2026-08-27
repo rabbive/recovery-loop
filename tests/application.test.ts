@@ -66,6 +66,42 @@ describe('application scaffold', () => {
     expect(createRecoveryApplication({ config }).diagnosisEngine).not.toBeInstanceOf(AnthropicDiagnosisEngine);
   });
 
+  it('uses Pincc\'s native Messages route for Claude model ids', async () => {
+    const config = loadConfig({
+      PORT: '3000',
+      PINCC_API_KEY: 'pincc-key',
+      PINCC_MODEL: 'claude-sonnet-5',
+      PINCC_BASE_URL: 'https://v2.pincc.ai',
+    });
+    const recoveryCase = addAttempt(createRecoveryCase('pincc-claude', context, '2026-01-01T00:00:00.000Z'), {
+      id: 'pincc-attempt-1',
+      providerPaymentId: 'pay_pincc',
+      method: 'recurring_mandate',
+      status: 'failed',
+      failureCode: 'insufficient_funds',
+      occurredAt: '2026-01-01T00:00:00.000Z',
+    });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      content: [{
+        type: 'tool_use',
+        name: 'record_diagnosis',
+        input: {
+          failureCategory: 'transient',
+          confidence: 0.9,
+          evidence: ['pincc-attempt-1'],
+          recommendedAction: 'retry',
+          explanation: 'Insufficient funds is transient.',
+        },
+      }],
+    }), { status: 200 }));
+
+    const diagnosis = await createRecoveryApplication({ config }).diagnosisEngine.diagnose(recoveryCase);
+
+    expect(diagnosis.modelVersion).toBe('claude-sonnet-5');
+    expect(fetchSpy.mock.calls[0]?.[0]).toBe('https://v2.pincc.ai/v1/messages');
+    fetchSpy.mockRestore();
+  });
+
   it('wires the Razorpay adapter with its webhook secret and the injected clock', async () => {
     const config = loadConfig({ PORT: '3000', RAZORPAY_KEY_ID: 'rzp_test_key', RAZORPAY_KEY_SECRET: 'test_secret', RAZORPAY_WEBHOOK_SECRET: 'hook_secret' });
     const application = createRecoveryApplication({ config, clock: new FixedClock('2026-01-01T00:00:00.000Z') });

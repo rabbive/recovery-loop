@@ -29,7 +29,7 @@ services:
       - key: PINCC_API_KEY
         sync: false
       - key: PINCC_MODEL
-        value: gpt-5.4
+        value: claude-sonnet-5
       - key: PINCC_BASE_URL
         value: https://v2.pincc.ai
       - key: DIAGNOSIS_TIMEOUT_MS

@@ -1,4 +1,5 @@
 -- PostgreSQL foundation for the Recovery Case aggregate.
+-- Per-case workflow serialization uses transaction-scoped advisory locks; no schema object is needed.
 create table if not exists recovery_cases (
   id text primary key,
   status text not null,

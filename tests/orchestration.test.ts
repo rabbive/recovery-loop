@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { RecoveryCase } from '../src/domain.js';
+import type { RecoveryAction, RecoveryCase } from '../src/domain.js';
 import { DeterministicSimulator, FixedClock, type SimulatorScenario } from '../src/provider.js';
 import { DeterministicPolicy, FixtureDiagnosisEngine, InMemoryRecoveryStore, RecoveryWorkflow, type RecoveryStore } from '../src/recovery.js';
 
@@ -11,6 +11,20 @@ class CrashingStore implements RecoveryStore {
   crashOnNextSave = false;
   async get(id: string): Promise<RecoveryCase | undefined> { return this.inner.get(id); }
   async all(): Promise<RecoveryCase[]> { return this.inner.all(); }
+  async withCaseLock<T>(caseId: string, operation: (transaction: import('../src/recovery.js').RecoveryCaseTransaction) => Promise<T>): Promise<T> {
+    return this.inner.withCaseLock(caseId, (transaction) => operation({
+      get: transaction.get,
+      save: async (recoveryCase) => {
+        if (this.crashOnNextSave) {
+          this.crashOnNextSave = false;
+          throw new Error('process died before the action result was persisted');
+        }
+        await transaction.save(recoveryCase);
+      },
+    }));
+  }
+  async findLapsedFallbackCaseIds(now: string, limit: number): Promise<string[]> { return this.inner.findLapsedFallbackCaseIds(now, limit); }
+  async healthCheck(): Promise<void> { return this.inner.healthCheck(); }
   async save(recoveryCase: RecoveryCase): Promise<void> {
     if (this.crashOnNextSave) {
       this.crashOnNextSave = false;
@@ -18,6 +32,20 @@ class CrashingStore implements RecoveryStore {
     }
     await this.inner.save(recoveryCase);
   }
+}
+
+class GatedProvider extends DeterministicSimulator {
+  callsStarted = 0;
+  private release!: () => void;
+  private readonly gate = new Promise<void>((resolve) => { this.release = resolve; });
+
+  override async submitRetry(recoveryCase: RecoveryCase, action: RecoveryAction) {
+    this.callsStarted += 1;
+    if (this.callsStarted === 1) await this.gate;
+    return super.submitRetry(recoveryCase, action);
+  }
+
+  openGate(): void { this.release(); }
 }
 
 function setup(scenario: SimulatorScenario = { retry: 'success', fallback: 'success', diagnosis: 'transient' }, store: RecoveryStore = new InMemoryRecoveryStore()) {
@@ -84,6 +112,25 @@ describe('recovery orchestration', () => {
 
     expect(resumed.actions[0]?.status).toBe('succeeded');
     expect(provider.calls).toHaveLength(1);
+  });
+
+  it('serializes concurrent drives', async () => {
+    const store = new InMemoryRecoveryStore();
+    const clock = new FixedClock('2026-01-01T00:00:00.000Z');
+    const provider = new GatedProvider(new Map([['case-1', { retry: 'success', fallback: 'success', diagnosis: 'transient' }]]), clock);
+    const workflow = new RecoveryWorkflow(store, provider, new FixtureDiagnosisEngine(), new DeterministicPolicy(), clock);
+    await openFailedCase(workflow, provider);
+
+    const first = workflow.drive('case-1');
+    const second = workflow.drive('case-1');
+    await Promise.resolve();
+    provider.openGate();
+    await Promise.all([first, second]);
+
+    expect(provider.callsStarted).toBe(1);
+    expect(provider.calls.map((action) => action.idempotencyKey)).toEqual(['case-1:retry']);
+    expect((await store.get('case-1'))?.actions).toHaveLength(1);
+    expect((await store.get('case-1'))?.decisions.filter((decision) => decision.allowed)).toHaveLength(1);
   });
 
   it('records the fallback link with the expiry the provider granted', async () => {

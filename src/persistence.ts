@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
-import { Pool, type PoolConfig } from 'pg';
+import { Pool, type PoolClient, type PoolConfig } from 'pg';
 import type { RecoveryCase } from './domain.js';
-import type { RecoveryStore } from './recovery.js';
+import type { RecoveryCaseTransaction, RecoveryStore } from './recovery.js';
 import type { EvaluationRun, EvaluationRunStore } from './evaluation.js';
 
 export class PostgresRecoveryStore implements RecoveryStore {
@@ -22,11 +22,35 @@ export class PostgresRecoveryStore implements RecoveryStore {
     return result.rows[0]?.state;
   }
 
-  async save(recoveryCase: RecoveryCase): Promise<void> {
+  async withCaseLock<T>(caseId: string, operation: (transaction: RecoveryCaseTransaction) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
     try {
       await client.query('begin');
-      const context = recoveryCase.context;
+      await client.query('select pg_advisory_xact_lock(hashtextextended($1, 0))', [caseId]);
+      const transaction: RecoveryCaseTransaction = {
+        get: async () => {
+          const result = await client.query<{ state: RecoveryCase }>('select state from recovery_cases where id = $1', [caseId]);
+          return result.rows[0]?.state;
+        },
+        save: async (recoveryCase) => this.saveWithClient(client, recoveryCase),
+      };
+      const result = await operation(transaction);
+      await client.query('commit');
+      return result;
+    } catch (error) {
+      await client.query('rollback');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async save(recoveryCase: RecoveryCase): Promise<void> {
+    await this.withCaseLock(recoveryCase.id, (transaction) => transaction.save(recoveryCase));
+  }
+
+  private async saveWithClient(client: PoolClient, recoveryCase: RecoveryCase): Promise<void> {
+    const context = recoveryCase.context;
       await client.query(
         `insert into recovery_cases
           (id, status, customer_id, subscription_id, order_id, amount, currency, due_at, recovered_amount, outcome, created_at, updated_at, state)
@@ -83,19 +107,31 @@ export class PostgresRecoveryStore implements RecoveryStore {
           [audit.id, audit.caseId, audit.type, audit.actor, audit.at, audit.explanation, JSON.stringify(audit.data)],
         );
       }
-      await client.query('commit');
-    } catch (error) {
-      await client.query('rollback');
-      throw error;
-    } finally {
-      client.release();
-    }
   }
 
   async all(): Promise<RecoveryCase[]> {
     const result = await this.pool.query<{ state: RecoveryCase }>('select state from recovery_cases order by created_at asc');
     return result.rows.map((row) => row.state);
   }
+
+  async findLapsedFallbackCaseIds(now: string, limit: number): Promise<string[]> {
+    const result = await this.pool.query<{ case_id: string }>(
+      `select ra.case_id
+       from recovery_actions ra
+       join recovery_cases rc on rc.id = ra.case_id
+       where ra.kind = 'fallback_link'
+         and ra.status <> 'failed'
+         and ra.expires_at <= $1
+         and rc.status not in ('recovered', 'escalated', 'exhausted', 'stopped')
+       group by ra.case_id
+       order by min(ra.expires_at), ra.case_id
+       limit $2`,
+      [now, limit],
+    );
+    return result.rows.map((row) => row.case_id);
+  }
+
+  async healthCheck(): Promise<void> { await this.pool.query('select 1'); }
 
   async close(): Promise<void> { await this.pool.end(); }
 }

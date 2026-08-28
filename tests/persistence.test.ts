@@ -1,5 +1,5 @@
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import { Pool } from 'pg';
+import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { Pool, type PoolClient } from 'pg';
 import { createPostgresStore } from '../src/persistence.js';
 import { DeterministicPolicy, RecoveryWorkflow, InMemoryRecoveryStore } from '../src/recovery.js';
 import { DeterministicSimulator, FixedClock } from '../src/provider.js';
@@ -21,6 +21,7 @@ const store = connectionString === undefined ? undefined : createPostgresStore(c
 const fixture = connectionString === undefined ? undefined : new Pool({ connectionString });
 const suite = store === undefined ? describe.skip : describe;
 const tables = ['audit_events', 'recovery_actions', 'policy_decisions', 'diagnoses', 'payment_attempts', 'provider_events', 'recovery_cases', 'evaluation_runs'];
+let serializationClient: PoolClient | undefined;
 
 afterAll(async () => { await store?.close(); await fixture?.end(); });
 
@@ -42,8 +43,16 @@ async function drivenCase(): Promise<RecoveryCase> {
 
 suite('PostgresRecoveryStore', () => {
   beforeEach(async () => {
+    serializationClient = await fixture!.connect();
+    await serializationClient.query("select pg_advisory_lock(hashtextextended('recovery-loop-test-suite', 0))");
     await store!.initialize();
-    await fixture!.query(`truncate ${tables.join(', ')} restart identity cascade`);
+    await serializationClient.query(`truncate ${tables.join(', ')} restart identity cascade`);
+  });
+
+  afterEach(async () => {
+    await serializationClient?.query("select pg_advisory_unlock(hashtextextended('recovery-loop-test-suite', 0))");
+    serializationClient?.release();
+    serializationClient = undefined;
   });
 
   it('round-trips a driven case with its events, diagnosis, decisions, actions, and audit trail', async () => {
@@ -56,6 +65,8 @@ suite('PostgresRecoveryStore', () => {
     expect(loaded?.actions.length).toBeGreaterThan(0);
     expect(loaded?.audit.length).toBeGreaterThan(0);
     expect(loaded?.diagnosis?.failureCategory).toBe('transient');
+    expect(await store!.findLapsedFallbackCaseIds('2026-01-03T00:00:00.000Z', 100)).toContain('case-1');
+    await expect(store!.healthCheck()).resolves.toBeUndefined();
   });
 
   it('keeps every policy decision the case recorded, including two decided in the same instant', async () => {

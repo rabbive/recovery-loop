@@ -9,6 +9,7 @@
 # Logs and temporary files
 *.log
 .tmp/
+.worktrees/
 
 # Node.js
 node_modules/

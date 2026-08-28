@@ -73,7 +73,7 @@ function razorpay(overrides: {
     }
     return new Response(JSON.stringify({ error: { description: `unexpected ${method} ${url.pathname}` } }), { status: 404 });
   }) as unknown as typeof fetch;
-  return { requests, provider: new RazorpayTestModeProvider({ keyId: 'rzp_test_key', keySecret: 'test_secret', fetcher, clock }) };
+  return { requests, provider: new RazorpayTestModeProvider({ keyId: 'rzp_test_key', keySecret: 'test_secret', webhookSecret: 'test_secret', recurringRetryEnabled: true, fetcher, clock }) };
 }
 
 describe('Razorpay Test Mode recurring retry', () => {
@@ -198,7 +198,7 @@ describe('Razorpay Test Mode recurring retry', () => {
 
   it('maps a transport failure to a failed result rather than throwing', async () => {
     const fetcher = (async () => { throw new Error('socket hang up'); }) as unknown as typeof fetch;
-    const provider = new RazorpayTestModeProvider({ keyId: 'rzp_test_key', keySecret: 'test_secret', fetcher, clock });
+    const provider = new RazorpayTestModeProvider({ keyId: 'rzp_test_key', keySecret: 'test_secret', webhookSecret: 'test_secret', recurringRetryEnabled: true, fetcher, clock });
     const result = await provider.submitRetry(mandateCase(), action('retry'));
     expect(result.status).toBe('failed');
     expect(result.message).toContain('socket hang up');
@@ -230,7 +230,7 @@ describe('Razorpay Test Mode safety', () => {
   it('refuses every money operation when the credentials are not Test Mode keys', async () => {
     const requests: string[] = [];
     const fetcher = (async (input: string | URL | Request) => { requests.push(String(input)); return new Response('{}', { status: 200 }); }) as unknown as typeof fetch;
-    const provider = new RazorpayTestModeProvider({ keyId: 'rzp_live_key', keySecret: 'live_secret', fetcher, clock });
+    const provider = new RazorpayTestModeProvider({ keyId: 'rzp_live_key', keySecret: 'live_secret', webhookSecret: 'test_secret', recurringRetryEnabled: true, fetcher, clock });
     const retry = await provider.submitRetry(mandateCase(), action('retry'));
     const link = await provider.createFallbackLink(mandateCase(), action('fallback_link'));
     expect(retry.status).toBe('failed');
@@ -241,7 +241,7 @@ describe('Razorpay Test Mode safety', () => {
   });
 
   it('verifies webhooks with the webhook secret when one is configured', () => {
-    const provider = new RazorpayTestModeProvider({ keyId: 'rzp_test_key', keySecret: 'test_secret', webhookSecret: 'hook_secret', clock });
+    const provider = new RazorpayTestModeProvider({ keyId: 'rzp_test_key', keySecret: 'test_secret', webhookSecret: 'hook_secret', recurringRetryEnabled: true, clock });
     const signed = createHmac('sha256', 'hook_secret').update('{"a":1}').digest('hex');
     expect(provider.verifyEvent('{"a":1}', signed)).toBe(true);
     expect(provider.verifyEvent('{"a":1}', createHmac('sha256', 'test_secret').update('{"a":1}').digest('hex'))).toBe(false);

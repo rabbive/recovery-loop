@@ -485,3 +485,35 @@ URLs checked and confirmed **404** (so no such page exists to cite): `/docs/paym
 - razorpay.com was reachable throughout; nothing in this document is recalled rather than sourced. Where a source could not be found, the document says "docs do not say" rather than filling the gap.
 - No authenticated Razorpay Dashboard access, no Test Mode API keys, and no live API calls were used. Every "docs do not say" item is a documentation gap, not a tested negative — several are cheap to resolve with one Test Mode call and should be resolved that way rather than by more reading.
 - Razorpay's docs are region- and account-dependent (the site advertises IN/MY/SG/US variants). This review read the default India variant.
+
+## Live recurring retry proof gate
+
+The recurring mandate charge is implemented from Razorpay's API reference and has **not** been run
+against the account. `RAZORPAY_RECURRING_RETRY_ENABLED` therefore defaults to `false`, and while it
+is false the adapter refuses the charge without making a network call: policy steps the case down
+to the fallback payment link, which *has* been exercised against Test Mode.
+
+The flag may be enabled only after every check below has been completed and recorded here. Record
+dates, sanitized request and response shapes, and identifiers — never secrets, card numbers, or
+customer contact details.
+
+1. Obtain Razorpay confirmation that recurring card payments are enabled on the Test Mode account.
+2. Create a Test Mode customer and complete a card-mandate authorization transaction.
+3. Fetch the customer token and record a sanitized response showing a confirmed recurring mandate.
+4. Create a subsequent Test Mode payment using the documented recurring API and record its payment id.
+5. Produce or identify a failed subsequent mandate payment, wait the provider-required interval
+   where applicable, and pre-register its Recovery Case with the same amount, currency, customer,
+   subscription, and order context.
+6. Run `tests/razorpay-recurring-proof.test.ts` with that payment id and context. It must submit one
+   retry, return a real `pay_...` reference, and resolve a replayed action identity to the same
+   payment rather than creating a second one.
+7. Deliver a valid Razorpay-signed success webhook for that payment id and confirm the case records
+   `recoveryAttribution` naming the approved retry.
+8. Deliver a success carrying a different payment id and confirm recovered revenue does not change.
+9. Store the date, account capability, sanitized request and response shapes, webhook event ids, and
+   command results in this document.
+10. Only then set `RAZORPAY_RECURRING_RETRY_ENABLED=true`, and only on a non-public Test Mode
+    integration app. The public demo keeps simulator payments and the proven fallback-link path.
+
+**Current state: not completed; recurring retry is disabled.** No step above has been performed, so
+nothing in this repository should be read as evidence that a recurring charge has succeeded.

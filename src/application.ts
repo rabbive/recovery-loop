@@ -37,7 +37,9 @@ export function createRecoveryApplication(options: RecoveryApplicationOptions): 
     : new RazorpayTestModeProvider({
       keyId: options.config.razorpayKeyId ?? '',
       keySecret: options.config.razorpayKeySecret,
-      ...(options.config.razorpayWebhookSecret === undefined ? {} : { webhookSecret: options.config.razorpayWebhookSecret }),
+      // loadConfig refuses Razorpay credentials without it, so this is always the real secret.
+      webhookSecret: options.config.razorpayWebhookSecret ?? '',
+      recurringRetryEnabled: options.config.razorpayRecurringRetryEnabled,
       clock,
     }));
   const diagnosisEngine = options.diagnosisEngine ?? (options.config.pinccApiKey !== undefined

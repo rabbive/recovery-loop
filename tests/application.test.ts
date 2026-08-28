@@ -2,7 +2,7 @@ import { createHmac } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '../src/config.js';
 import { createRecoveryApplication } from '../src/application.js';
-import { FixedClock } from '../src/provider.js';
+import { FixedClock, RazorpayTestModeProvider } from '../src/provider.js';
 import { AnthropicDiagnosisEngine, FixtureDiagnosisEngine, ModelDiagnosisEngine } from '../src/diagnosis.js';
 import { addAttempt, createRecoveryCase } from '../src/domain.js';
 
@@ -12,10 +12,41 @@ const context = {
 
 describe('application scaffold', () => {
   it('loads validated runtime configuration without exposing secrets in the result shape', () => {
-    const config = loadConfig({ PORT: '3100', DATABASE_URL: 'postgres://localhost/recovery_loop', RAZORPAY_KEY_ID: 'key', RAZORPAY_KEY_SECRET: 'secret' });
+    const config = loadConfig({ PORT: '3100', DATABASE_URL: 'postgres://localhost/recovery_loop', RAZORPAY_KEY_ID: 'key', RAZORPAY_KEY_SECRET: 'secret', RAZORPAY_WEBHOOK_SECRET: 'hook' });
     expect(config.port).toBe(3100);
     expect(config.databaseUrl).toContain('recovery_loop');
     expect(config.razorpayKeySecret).toBe('secret');
+    expect(config.razorpayWebhookSecret).toBe('hook');
+  });
+
+  it('refuses Razorpay credentials with no webhook secret of their own', () => {
+    // Falling back to the API secret meant one leaked value could both call Razorpay and forge
+    // deliveries, and a misconfigured instance verified signatures nobody had ever issued.
+    expect(() => loadConfig({ PORT: '3000', RAZORPAY_KEY_ID: 'rzp_test_key', RAZORPAY_KEY_SECRET: 'api_secret' }))
+      .toThrow(/RAZORPAY_WEBHOOK_SECRET/);
+  });
+
+  it('keeps the unproven recurring charge off unless something says exactly true', () => {
+    expect(loadConfig({ PORT: '3000' }).razorpayRecurringRetryEnabled).toBe(false);
+    expect(loadConfig({ PORT: '3000', RAZORPAY_RECURRING_RETRY_ENABLED: 'false' }).razorpayRecurringRetryEnabled).toBe(false);
+    expect(loadConfig({ PORT: '3000', RAZORPAY_RECURRING_RETRY_ENABLED: 'true' }).razorpayRecurringRetryEnabled).toBe(true);
+    // A typo must read as off. Anything else would arm a money operation nobody has watched work.
+    expect(() => loadConfig({ PORT: '3000', RAZORPAY_RECURRING_RETRY_ENABLED: 'yes' })).toThrow(/must be true or false/);
+  });
+
+  it('reaches no network for a recurring charge while the retry is unproven', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const provider = new RazorpayTestModeProvider({ keyId: 'rzp_test_key', keySecret: 'api_secret', webhookSecret: 'hook_secret', clock: new FixedClock('2026-01-01T00:00:00.000Z') });
+    const mandate = addAttempt(createRecoveryCase('gated-case', context, '2026-01-01T00:00:00.000Z'), { id: 'a1', providerPaymentId: 'pay_1', method: 'recurring_mandate', status: 'failed', occurredAt: '2026-01-01T00:00:00.000Z' });
+
+    const eligibility = await provider.retryEligibility(mandate);
+    const submitted = await provider.submitRetry(mandate, { id: 'gated-case:action:1', kind: 'retry', status: 'pending', idempotencyKey: 'gated-case:retry', createdAt: '2026-01-01T00:00:00.000Z' });
+
+    expect(eligibility.eligible).toBe(false);
+    expect(submitted.status).toBe('failed');
+    expect(submitted.message).toMatch(/unverified and disabled/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
   });
 
   it('composes a workflow seam that tests can drive with a fixed clock', async () => {

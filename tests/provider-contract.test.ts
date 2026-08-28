@@ -71,7 +71,7 @@ function razorpay(handler?: (url: string, init: RequestInit) => Response) {
     links.set(reference, id);
     return new Response(JSON.stringify({ id, reference_id: reference, short_url: 'https://rzp.io/i/test', status: 'created' }), { status: 200 });
   }) as unknown as typeof fetch;
-  return { requests, provider: new RazorpayTestModeProvider({ keyId: 'rzp_test_key', keySecret: 'test_secret', fetcher, clock }) };
+  return { requests, provider: new RazorpayTestModeProvider({ keyId: 'rzp_test_key', keySecret: 'test_secret', webhookSecret: 'test_secret', recurringRetryEnabled: true, fetcher, clock }) };
 }
 
 /** A stable secret so the contract can sign; a real instance generates one per process. */
@@ -86,7 +86,7 @@ const implementations: readonly { name: string; make: () => PaymentProvider; sig
   {
     name: 'RazorpayTestModeProvider',
     make: () => razorpay().provider,
-    signature: (raw) => new RazorpayTestModeProvider({ keyId: 'rzp_test_key', keySecret: 'test_secret', clock }).signPayload(raw),
+    signature: (raw) => new RazorpayTestModeProvider({ keyId: 'rzp_test_key', keySecret: 'test_secret', webhookSecret: 'test_secret', recurringRetryEnabled: true, clock }).signPayload(raw),
   },
 ];
 
@@ -223,7 +223,7 @@ describe('RazorpayTestModeProvider', () => {
   });
 
   it('fails without moving money when credentials are missing', async () => {
-    const provider = new RazorpayTestModeProvider({ keyId: '', keySecret: '', clock });
+    const provider = new RazorpayTestModeProvider({ keyId: '', keySecret: '', webhookSecret: 'unused', recurringRetryEnabled: true, clock });
     expect((await provider.submitRetry(mandateCase(), action('retry'))).status).toBe('failed');
     expect((await provider.createFallbackLink(mandateCase(), action('fallback_link'))).status).toBe('failed');
   });

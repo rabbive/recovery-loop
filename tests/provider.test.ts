@@ -17,7 +17,7 @@ describe('DeterministicSimulator', () => {
 
   it('verifies Razorpay-style HMAC signatures without accepting missing credentials', async () => {
     const { RazorpayTestModeProvider } = await import('../src/provider.js');
-    const provider = new RazorpayTestModeProvider({ keyId: 'test_key', keySecret: 'test_secret' });
+    const provider = new RazorpayTestModeProvider({ keyId: 'test_key', keySecret: 'test_secret', webhookSecret: 'test_secret', recurringRetryEnabled: true });
     const signature = createHmac('sha256', 'test_secret').update('payload').digest('hex');
     expect(provider.verifyEvent('payload', signature)).toBe(true);
     expect(provider.verifyEvent('payload', 'bad')).toBe(false);

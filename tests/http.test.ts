@@ -9,7 +9,7 @@ import { InMemoryRecoveryStore } from '../src/recovery.js';
 
 const SIMULATOR_SECRET = 'test-simulator-secret';
 const CONTROL_TOKEN = 'test-control-token';
-const config = { port: 0, logLevel: 'info' as const, simulatorWebhookSecret: SIMULATOR_SECRET, controlPlaneToken: CONTROL_TOKEN };
+const config = { port: 0, logLevel: 'info' as const, simulatorWebhookSecret: SIMULATOR_SECRET, controlPlaneToken: CONTROL_TOKEN, razorpayRecurringRetryEnabled: false };
 const context = { customerId: 'customer-1', subscriptionId: 'subscription-1', orderId: 'order-1', amount: 1200, currency: 'INR', dueAt: '2026-01-01T00:00:00.000Z' };
 
 let server: Server;

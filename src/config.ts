@@ -4,6 +4,8 @@ export interface RuntimeConfig {
   readonly razorpayKeyId?: string;
   readonly razorpayKeySecret?: string;
   readonly razorpayWebhookSecret?: string;
+  /** Whether the unproven Razorpay recurring charge may reach the network. Off unless proven. */
+  readonly razorpayRecurringRetryEnabled: boolean;
   /** Bearer token for the routes that change state. Absent means the control plane is disabled. */
   readonly controlPlaneToken?: string;
   /** HMAC secret the simulator verifies deliveries against. Absent means a fresh per-process secret. */
@@ -25,7 +27,15 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Runtim
   const razorpayKeySecret = environment.RAZORPAY_KEY_SECRET?.trim() || undefined;
   if ((razorpayKeyId === undefined) !== (razorpayKeySecret === undefined)) throw new Error('RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET must be configured together');
   // Razorpay signs webhooks with the webhook secret, which is issued separately from the API key.
+  // Substituting the API secret would mean one leaked value both calls the API and forges events.
   const razorpayWebhookSecret = environment.RAZORPAY_WEBHOOK_SECRET?.trim() || undefined;
+  if (razorpayKeySecret !== undefined && razorpayWebhookSecret === undefined) throw new Error('RAZORPAY_WEBHOOK_SECRET must be configured alongside the Razorpay API credentials');
+  // Only the exact string enables it, so a typo reads as off rather than silently arming a charge.
+  const rawRecurringRetry = environment.RAZORPAY_RECURRING_RETRY_ENABLED?.trim() || undefined;
+  if (rawRecurringRetry !== undefined && rawRecurringRetry !== 'true' && rawRecurringRetry !== 'false') {
+    throw new Error(`RAZORPAY_RECURRING_RETRY_ENABLED must be true or false: ${rawRecurringRetry}`);
+  }
+  const razorpayRecurringRetryEnabled = rawRecurringRetry === 'true';
   const controlPlaneToken = environment.CONTROL_PLANE_TOKEN?.trim() || undefined;
   const simulatorWebhookSecret = environment.SIMULATOR_WEBHOOK_SECRET?.trim() || undefined;
   const anthropicApiKey = environment.ANTHROPIC_API_KEY?.trim() || undefined;
@@ -56,6 +66,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Runtim
     ...(razorpayKeyId === undefined ? {} : { razorpayKeyId }),
     ...(razorpayKeySecret === undefined ? {} : { razorpayKeySecret }),
     ...(razorpayWebhookSecret === undefined ? {} : { razorpayWebhookSecret }),
+    razorpayRecurringRetryEnabled,
     ...(controlPlaneToken === undefined ? {} : { controlPlaneToken }),
     ...(simulatorWebhookSecret === undefined ? {} : { simulatorWebhookSecret }),
     ...(anthropicApiKey === undefined ? {} : { anthropicApiKey }),

@@ -9,6 +9,7 @@ import { addAttempt, createRecoveryCase, type RecoveryCase } from '../src/domain
  */
 const keyId = process.env.RAZORPAY_KEY_ID ?? '';
 const keySecret = process.env.RAZORPAY_KEY_SECRET ?? '';
+const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET ?? '';
 const configured = keyId.startsWith('rzp_test_') && keySecret.length > 0;
 
 function renewalCase(id: string): RecoveryCase {
@@ -19,7 +20,7 @@ function renewalCase(id: string): RecoveryCase {
 }
 
 describe.skipIf(!configured)('Razorpay Test Mode integration', () => {
-  const provider = new RazorpayTestModeProvider({ keyId, keySecret, clock: new SystemClock() });
+  const provider = new RazorpayTestModeProvider({ keyId, keySecret, webhookSecret, clock: new SystemClock() });
 
   it('creates a real expiring Test Mode payment link and replays the same action identity', async () => {
     const recoveryCase = renewalCase(`itest-${Date.now()}`);

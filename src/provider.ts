@@ -187,12 +187,26 @@ export class DeterministicSimulator implements PaymentProvider {
 export interface RazorpayTestModeOptions {
   readonly keyId: string;
   readonly keySecret: string;
-  /** Razorpay signs webhooks with the webhook secret, which is configured separately from the API key. */
-  readonly webhookSecret?: string;
+  /**
+   * Razorpay signs webhooks with the webhook secret, which it issues separately from the API key.
+   * Required, and never defaulted to the API secret: doing that made an attacker who learned one
+   * value able to both call the API and forge deliveries, and made a misconfigured instance look
+   * like a working one.
+   */
+  readonly webhookSecret: string;
+  /**
+   * Whether the recurring mandate charge may reach Razorpay. Off unless a real Test Mode charge
+   * has been proven end to end: the code path is written from the API reference and has never run
+   * against the account, and a money operation nobody has watched work is not one to ship enabled.
+   */
+  readonly recurringRetryEnabled?: boolean;
   readonly baseUrl?: string;
   readonly fetcher?: typeof fetch;
   readonly clock?: Clock;
 }
+
+/** Why an unproven recurring charge is refused. Named so the adapter and its tests cannot drift. */
+const RECURRING_RETRY_DISABLED = 'Razorpay recurring retry is unverified and disabled; use the fallback payment link';
 
 /** Razorpay rejects a receipt or reference longer than this, so long action identities are folded. */
 const REFERENCE_MAX_LENGTH = 40;
@@ -251,6 +265,7 @@ export class RazorpayTestModeProvider implements PaymentProvider {
   }
 
   async retryEligibility(recoveryCase: RecoveryCase): Promise<RetryEligibility> {
+    if (this.options.recurringRetryEnabled !== true) return { eligible: false, reason: RECURRING_RETRY_DISABLED };
     return chargeableMandateAttempt(recoveryCase) === undefined
       ? { eligible: false, reason: 'Only provider-supported recurring mandates may be retried' }
       : { eligible: true, reason: 'Recurring mandate supplied by provider' };
@@ -263,6 +278,9 @@ export class RazorpayTestModeProvider implements PaymentProvider {
    * infrastructure retry cannot collect the renewal twice.
    */
   async submitRetry(recoveryCase: RecoveryCase, action: RecoveryAction): Promise<ProviderResult> {
+    // Guarded here as well as in eligibility. A caller that skipped the question would otherwise
+    // reach the network, and this is the call that moves money.
+    if (this.options.recurringRetryEnabled !== true) return { status: 'failed', message: RECURRING_RETRY_DISABLED };
     const refusal = this.refusal();
     if (refusal) return { status: 'failed', message: refusal };
     const attempt = chargeableMandateAttempt(recoveryCase);
@@ -427,7 +445,7 @@ export class RazorpayTestModeProvider implements PaymentProvider {
   }
 
   private webhookSecret(): string {
-    return this.options.webhookSecret ?? this.options.keySecret;
+    return this.options.webhookSecret;
   }
 
   private now(): Date {

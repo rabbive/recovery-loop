@@ -28,7 +28,7 @@ describe('server composition', () => {
 
 describe('publishing the seeded batch on start', () => {
   function application() {
-    return createRecoveryApplication({ config: { port: 0 }, clock: new FixedClock('2026-01-01T00:00:00.000Z'), store: new InMemoryRecoveryStore() });
+    return createRecoveryApplication({ config: { port: 0, razorpayRecurringRetryEnabled: false }, clock: new FixedClock('2026-01-01T00:00:00.000Z'), store: new InMemoryRecoveryStore() });
   }
 
   it('publishes figures so a cold instance does not greet its visitor with zeroes', async () => {

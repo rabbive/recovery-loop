@@ -7,7 +7,7 @@ import { RazorpayTestModeProvider, FixedClock } from '../src/provider.js';
 import { InMemoryRecoveryStore } from '../src/recovery.js';
 import { labScenarios, type LabScenario, type LabReplayResult } from '../src/lab.js';
 
-const config = { port: 0, controlPlaneToken: 'lab-control-token', simulatorWebhookSecret: 'lab-simulator-secret' };
+const config = { port: 0, controlPlaneToken: 'lab-control-token', simulatorWebhookSecret: 'lab-simulator-secret', razorpayRecurringRetryEnabled: false };
 const NOW = '2026-01-01T00:00:00.000Z';
 
 async function boot(provider?: ConstructorParameters<typeof RazorpayTestModeProvider>[0]): Promise<{ server: Server; origin: string }> {
@@ -122,7 +122,7 @@ describe('webhook replay lab', () => {
 });
 
 describe('replay lab on an instance holding real credentials', () => {
-  beforeEach(async () => { ({ server, origin } = await boot({ keyId: 'rzp_test_lab', keySecret: 'secret', clock: new FixedClock(NOW) })); });
+  beforeEach(async () => { ({ server, origin } = await boot({ keyId: 'rzp_test_lab', keySecret: 'secret', webhookSecret: 'lab-hook-secret', clock: new FixedClock(NOW) })); });
 
   it('still replays, because it never touches the configured provider', async () => {
     // The lab builds its own simulator. An instance wired to Razorpay can therefore demonstrate the

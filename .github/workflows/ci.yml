@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # The PostgreSQL adapter is the store the durable Heroku deployment actually uses, so it needs
+    # a real database to test against rather than the in-memory one every other suite exercises.
+    # This service container is disposable: created fresh for the job, discarded after.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: recovery_loop_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/recovery_loop_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      # Runs everything: the in-memory-backed suites, and — because TEST_DATABASE_URL is set above
+      # — tests/persistence.test.ts and tests/postgres-concurrency.test.ts too, rather than the
+      # honest skip they fall back to locally without a database. The Razorpay live suites
+      # (tests/razorpay-integration.test.ts, tests/razorpay-recurring-proof.test.ts) stay skipped
+      # here: they need real Test Mode credentials, which this workflow does not hold. See
+      # https://github.com/rabbive/recovery-loop/issues/25 for wiring those in on a schedule.
+      - run: npm test
+
+      - run: npm run build

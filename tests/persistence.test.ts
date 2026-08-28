@@ -25,6 +25,21 @@ let serializationClient: PoolClient | undefined;
 
 afterAll(async () => { await store?.close(); await fixture?.end(); });
 
+/**
+ * Runs without a database, because the failure it guards against only appears once there is one:
+ * a managed Postgres refuses an unencrypted client outright, and the deployed app crashed on boot
+ * with `no pg_hba.conf entry ... no encryption` until the pool asked for TLS.
+ */
+describe('connection encryption', () => {
+  const sslOf = (connectionString: string): unknown => (createPostgresStore(connectionString) as unknown as { pool: { options: { ssl?: unknown } } }).pool.options.ssl;
+
+  it('encrypts a managed database connection and leaves a local one alone', () => {
+    expect(sslOf('postgres://user:pw@ec2-1-2-3-4.compute.amazonaws.com:5432/dbname')).toEqual({ rejectUnauthorized: false });
+    expect(sslOf('postgres://postgres@127.0.0.1:5432/recovery_loop_test')).toBe(false);
+    expect(sslOf('postgres://postgres:postgres@localhost:5432/recovery_loop_test')).toBe(false);
+  });
+});
+
 async function rowCount(table: string, caseId: string): Promise<number> {
   const result = await fixture!.query<{ count: string }>(`select count(*) from ${table} where case_id = $1`, [caseId]);
   return Number(result.rows[0]?.count ?? '0');

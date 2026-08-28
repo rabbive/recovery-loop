@@ -160,7 +160,23 @@ export class PostgresEvaluationRunStore implements EvaluationRunStore {
 
 }
 
+/**
+ * Whether the connection has to be encrypted. A managed database refuses an unencrypted client
+ * outright — Heroku answers `no pg_hba.conf entry ... no encryption` — while a local development
+ * database usually has no certificate at all, so neither setting works for both.
+ *
+ * `rejectUnauthorized` is false because Heroku Postgres presents a certificate signed by an
+ * authority outside Node's bundle, which is what Heroku's own guidance says to do. It buys
+ * encryption in transit, not proof of who is on the other end.
+ */
+function sslFor(connectionString: string): PoolConfig['ssl'] {
+  const local = /@(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(connectionString);
+  return local ? false : { rejectUnauthorized: false };
+}
+
 export function createPostgresStore(connectionString = process.env.DATABASE_URL, config: PoolConfig = {}): PostgresRecoveryStore {
-  const poolConfig: PoolConfig = connectionString === undefined ? config : { ...config, connectionString };
+  const poolConfig: PoolConfig = connectionString === undefined
+    ? config
+    : { ssl: sslFor(connectionString), ...config, connectionString };
   return new PostgresRecoveryStore(new Pool(poolConfig));
 }

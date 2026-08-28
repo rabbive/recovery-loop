@@ -1,4 +1,4 @@
-import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { PaymentAttempt, ProviderEvent, RecoveryAction, RecoveryCase } from './domain.js';
 
 export interface Clock {
@@ -52,14 +52,6 @@ export type FallbackLinkResult = ProviderResult & { readonly expiresAt: string }
  */
 export interface PaymentProvider {
   verifyEvent(raw: string, signature: string): boolean;
-  /**
-   * Signs a synthetic delivery so the replay lab can exercise the real webhook boundary.
-   *
-   * Deliberately optional, and deliberately absent from the Razorpay adapter: a deployed instance
-   * holding real credentials must never expose an endpoint that will sign an arbitrary body as
-   * though Razorpay sent it. Presence of this method is what makes the lab available at all.
-   */
-  signEvent?(raw: string): string;
   normalizeEvent(input: NormalizedEventInput, receivedAt: string): ProviderEvent;
   retryEligibility(recoveryCase: RecoveryCase): Promise<RetryEligibility>;
   submitRetry(recoveryCase: RecoveryCase, action: RecoveryAction): Promise<ProviderResult>;
@@ -108,20 +100,30 @@ export class DeterministicSimulator implements PaymentProvider {
   private readonly results = new Map<string, ProviderResult>();
   readonly calls: RecoveryAction[] = [];
 
+  private readonly webhookSecret: string;
+
   constructor(
     scenarios: ReadonlyMap<string, SimulatorScenario> = new Map(),
     private readonly clock: Clock = new SystemClock(),
+    // A fresh secret per instance by default. The simulator used to accept `sim:<body>`, which any
+    // visitor to a public demo could construct, so anyone could inject events and move the figures.
+    // Nothing outside this process knows the default, so nothing outside it can sign a delivery.
+    webhookSecret: string = randomBytes(32).toString('hex'),
   ) {
     this.scenarios = scenarios;
+    this.webhookSecret = webhookSecret;
+  }
+
+  /** The signature this simulator accepts for a body. Held privately: no route exposes it. */
+  private signPayload(raw: string): string {
+    return createHmac('sha256', this.webhookSecret).update(raw).digest('hex');
   }
 
   verifyEvent(raw: string, signature: string): boolean {
-    return raw.length > 0 && signature === `sim:${raw}`;
-  }
-
-  /** The counterpart of `verifyEvent`, so a lab delivery is signed rather than waved through. */
-  signEvent(raw: string): string {
-    return `sim:${raw}`;
+    if (!raw || !signature) return false;
+    const supplied = Buffer.from(signature, 'utf8');
+    const computed = Buffer.from(this.signPayload(raw), 'utf8');
+    return supplied.length === computed.length && timingSafeEqual(supplied, computed);
   }
 
   normalizeEvent(input: NormalizedEventInput, receivedAt: string): ProviderEvent {

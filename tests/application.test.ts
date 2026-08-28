@@ -102,6 +102,26 @@ describe('application scaffold', () => {
     fetchSpy.mockRestore();
   });
 
+  it('gives the simulator a secret nobody outside the process can guess', () => {
+    // Two instances with no configured secret must not accept each other's deliveries: a public
+    // demo whose signature format is public is a public write endpoint.
+    const first = createRecoveryApplication({ config: loadConfig({ PORT: '3000' }), clock: new FixedClock('2026-01-01T00:00:00.000Z') });
+    const second = createRecoveryApplication({ config: loadConfig({ PORT: '3000' }), clock: new FixedClock('2026-01-01T00:00:00.000Z') });
+
+    expect(first.provider.verifyEvent('{"a":1}', 'sim:{"a":1}')).toBe(false);
+    const configured = createRecoveryApplication({ config: loadConfig({ PORT: '3000', SIMULATOR_WEBHOOK_SECRET: 'shared' }), clock: new FixedClock('2026-01-01T00:00:00.000Z') });
+    const signed = createHmac('sha256', 'shared').update('{"a":1}').digest('hex');
+    expect(configured.provider.verifyEvent('{"a":1}', signed)).toBe(true);
+    expect(first.provider.verifyEvent('{"a":1}', signed)).toBe(false);
+    expect(second.provider.verifyEvent('{"a":1}', signed)).toBe(false);
+  });
+
+  it('reads the control-plane token, and leaves it undefined when nothing configured one', () => {
+    expect(loadConfig({ PORT: '3000', CONTROL_PLANE_TOKEN: 'operator-token' }).controlPlaneToken).toBe('operator-token');
+    expect(loadConfig({ PORT: '3000', CONTROL_PLANE_TOKEN: '   ' }).controlPlaneToken).toBeUndefined();
+    expect(loadConfig({ PORT: '3000' }).controlPlaneToken).toBeUndefined();
+  });
+
   it('wires the Razorpay adapter with its webhook secret and the injected clock', async () => {
     const config = loadConfig({ PORT: '3000', RAZORPAY_KEY_ID: 'rzp_test_key', RAZORPAY_KEY_SECRET: 'test_secret', RAZORPAY_WEBHOOK_SECRET: 'hook_secret' });
     const application = createRecoveryApplication({ config, clock: new FixedClock('2026-01-01T00:00:00.000Z') });

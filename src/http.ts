@@ -1,10 +1,12 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { RecoveryApplication } from './application.js';
 import type { NormalizedEventInput } from './provider.js';
-import { caseStatuses, isTerminal, terminalStatuses, type CaseStatus, type RecoveryCase } from './domain.js';
+import { caseStatuses, isTerminal, renewalContextViolation, type CaseStatus, type RecoveryCase, type RenewalContext } from './domain.js';
+import { authorizedControlRequest } from './auth.js';
+import { WebhookIngress, WebhookRejection } from './webhook.js';
 import { fallbackRecoveryMessage } from './messaging.js';
 import { publishSeededBatch } from './evaluation.js';
-import { labScenarios, type LabScenario } from './lab.js';
+import { LAB_INSTANT, LAB_SCENARIO_KEYS, LabRunner, labScenarios } from './lab.js';
 
 function send(response: ServerResponse, status: number, body: string, contentType = 'application/json'): void {
   response.writeHead(status, { 'content-type': `${contentType}; charset=utf-8`, 'cache-control': 'no-store' });
@@ -33,7 +35,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:11px 14p
 </style></head>
  <body><main data-shell>
 <header class="app-header"><div class="brand"><div class="eyebrow">Revenue operations</div><h1>Recovery Loop</h1><p class="lede">AI-assisted recovery for failed SaaS renewals.</p></div>
-<div class="header-actions"><span class="environment"><span class="dot"></span> Synthetic mode</span><button class="btn btn-primary" id="run">Run evaluation <span class="button-meta">60 cases</span></button><button class="theme-toggle" id="theme-toggle" data-theme-toggle type="button" aria-pressed="false" aria-label="Switch to dark mode"><span class="theme-icon" aria-hidden="true">☾</span><span class="theme-label">Dark</span></button></div></header>
+<div class="header-actions"><span class="environment"><span class="dot"></span> Synthetic mode</span><button class="theme-toggle" id="theme-toggle" data-theme-toggle type="button" aria-pressed="false" aria-label="Switch to dark mode"><span class="theme-icon" aria-hidden="true">☾</span><span class="theme-label">Dark</span></button></div></header>
 <div class="toolbar"><div class="toolbar-copy"><span class="eyebrow">Workspace snapshot</span><span class="muted" id="batch">Loading live figures…</span></div><label class="select-field"><span>Status</span>
 <select id="filter"><option value="">All</option>${caseStatuses.map((status) => `<option value="${status}">${status}</option>`).join('')}</select></label>
  </div>
@@ -42,10 +44,9 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:11px 14p
 <div class="table-shell" data-table-wrap><table><caption class="sr-only">Recovery cases</caption><thead><tr><th>Case</th><th>Customer</th><th>Status</th><th>Failure</th><th>Amount</th><th>Recovered</th><th>Actions</th><th>Audit</th><th>Updated</th></tr></thead><tbody id="cases"></tbody></table></div></section>
 <section class="section" aria-labelledby="detail-heading"><div class="section-heading" data-section-heading><div><h2 id="detail-heading">Case detail</h2><p>Decision context and the append-only audit trail.</p></div></div><div class="panel" id="detail"><div class="empty-state"><span class="badge badge-neutral" data-badge="status">Waiting for a case</span><p style="margin:10px 0 0">Select a row above to open the recovery record.</p></div></div></section>
 <div class="split-sections"><section class="section" aria-labelledby="evaluation-heading"><div class="section-heading" data-section-heading><div><h2 id="evaluation-heading">Evaluation run</h2><p>Seeded results compared with the loop's decisions.</p></div></div><div class="panel" id="evaluation"><div class="empty-state">No batch has run yet.</div></div></section>
-<section class="section" aria-labelledby="lab-heading"><div class="section-heading" data-section-heading><div><h2 id="lab-heading">Webhook replay lab</h2><p>Signed deliveries sent through the real webhook boundary.</p></div></div><div class="row"><button class="btn btn-outline" id="replay">Replay all scenarios</button><span class="muted" id="labnote"></span></div><div class="panel" id="lab" style="margin-top:12px"><div class="empty-state">Not run yet.</div></div></section></div>
+<section class="section" aria-labelledby="lab-heading"><div class="section-heading" data-section-heading><div><h2 id="lab-heading">Webhook replay lab</h2><p>Signed deliveries through the real webhook boundary, replayed in an isolated sandbox.</p></div></div><div class="row"><button class="btn btn-outline" id="replay">Replay all scenarios</button><span class="muted" id="labnote"></span></div><div class="panel" id="lab" style="margin-top:12px"><div class="empty-state">Not run yet.</div></div></section></div>
 </main>
 <script>
-const TERMINAL=${JSON.stringify([...terminalStatuses])};
 const money=(minor,currency)=>new Intl.NumberFormat('en-IN',{style:'currency',currency:currency||'INR'}).format(minor/100);
 const esc=v=>String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const label=v=>String(v??'—').replaceAll('_',' ');
@@ -95,9 +96,8 @@ function renderCases(cases){
 
 function renderDetail(c){
   const d=c.diagnosis;
-  const terminal=TERMINAL.includes(c.status);
   document.querySelector('#detail').innerHTML=
-    '<div class="detail-header"><div><div class="eyebrow">Recovery case</div><div class="detail-title"><code>'+esc(c.id)+'</code>'+statusBadge(c.status)+'</div></div>'+ (terminal?'':'<div class="detail-actions"><button class="btn btn-outline btn-danger" id="stop">Stop</button><button class="btn btn-outline btn-danger" id="escalate">Escalate</button></div>')+'</div>'+
+    '<div class="detail-header"><div><div class="eyebrow">Recovery case</div><div class="detail-title"><code>'+esc(c.id)+'</code>'+statusBadge(c.status)+'</div></div>'+'</div>'+
     '<div class="case-facts"><div class="fact"><span class="fact-label">Customer</span><strong>'+esc(c.context.customerId)+'</strong></div><div class="fact"><span class="fact-label">Subscription</span><strong>'+esc(c.context.subscriptionId)+'</strong></div><div class="fact"><span class="fact-label">Renewal amount</span><strong>'+money(c.context.amount,c.context.currency)+'</strong></div><div class="fact"><span class="fact-label">Due</span><strong>'+esc(c.context.dueAt)+'</strong></div></div>'+
     '<div class="detail-columns"><section class="detail-block"><div class="block-heading"><h3>Diagnosis</h3>'+(d?badge('confidence '+(d.confidence*100).toFixed(0)+'%','info'):'')+'</div>'+(d?'<p><strong>'+esc(label(d.failureCategory))+'</strong> · recommends '+esc(label(d.recommendedAction))+' · model '+esc(d.modelVersion)+'</p><p>'+esc(d.explanation)+'</p><ul>'+d.evidence.map(e=>'<li>'+esc(e)+'</li>').join('')+'</ul>':'<p class="muted">No diagnosis recorded.</p>')+'</section>'+
     '<section class="detail-block"><div class="block-heading"><h3>Policy decisions</h3></div>'+(c.decisions.length?'<ul>'+c.decisions.map(x=>'<li class="list-item">'+badge(x.allowed?'allowed':'blocked',x.allowed?'success':'danger')+'<div class="item-copy"><strong>'+esc(label(x.action))+'</strong> · '+esc(x.reason)+'<div class="muted">'+esc(x.policyVersion)+' · '+esc(x.decidedAt)+'</div></div></li>').join('')+'</ul>':'<p class="muted">None.</p>')+'</section>'+
@@ -105,9 +105,6 @@ function renderDetail(c){
     '<section class="detail-block"><div class="block-heading"><h3>Payment attempts</h3></div>'+(c.attempts.length?'<ul>'+c.attempts.map(a=>'<li><strong>'+esc(label(a.method))+'</strong> · '+esc(label(a.status))+(a.failureCode?' · '+esc(a.failureCode):'')+'<div class="muted">'+esc(a.occurredAt)+'</div></li>').join('')+'</ul>':'<p class="muted">None.</p>')+'</section>'+
     (c.fallbackMessage?'<section class="detail-block full"><div class="block-heading"><h3>Fallback message preview</h3>'+badge(c.fallbackMessage.expired?'expired':'preview only',c.fallbackMessage.expired?'danger':'neutral')+'</div><p class="muted">No email, SMS, WhatsApp, or voice provider is connected'+(c.fallbackMessage.expired?', and this link has expired':'')+'.</p><p><strong>'+esc(c.fallbackMessage.subject)+'</strong></p><pre class="preview">'+esc(c.fallbackMessage.body)+'</pre></section>':'')+
     '<section class="detail-block full"><div class="block-heading"><h3>Audit timeline</h3><span class="block-label">'+c.audit.length+' entries</span></div><ul class="timeline">'+c.audit.map(e=>'<li><code>'+esc(e.at)+'</code><strong>'+esc(label(e.type))+'</strong><span class="muted">('+esc(e.actor)+')</span><span>'+esc(e.explanation)+'</span>'+(Object.keys(e.data).length?'<span class="audit-data">'+esc(JSON.stringify(e.data))+'</span>':'')+'</li>').join('')+'</ul></section></div>';
-  const applyVerdict=async suffix=>{await fetch('/api/cases/'+encodeURIComponent(c.id)+suffix,{method:'POST'});await refresh();await openCase(c.id)};
-  const stop=document.querySelector('#stop');if(stop)stop.onclick=()=>applyVerdict('/stop');
-  const escalate=document.querySelector('#escalate');if(escalate)escalate.onclick=()=>applyVerdict('/escalate');
 }
 
 async function openCase(id){selected=id;const c=await get('/api/cases/'+encodeURIComponent(id));renderDetail(c);renderCases(await get(listUrl()))}
@@ -123,47 +120,30 @@ function renderEvaluation(batch){
 }
 async function refresh(){const [m,c,b]=await Promise.all([get('/api/metrics'),get(listUrl()),get('/api/evaluation')]);renderMetrics(m);renderCases(c);renderEvaluation(b)}
 document.querySelector('#filter').onchange=refresh;
-document.querySelector('#run').onclick=async()=>{await fetch('/api/evaluation',{method:'POST'});await refresh()};
 
-// The lab signs each body, then delivers it to the real webhook route and reports what came back.
-async function deliver(run,scenario,step,tamper){
-  const signed=await fetch('/api/lab/sign',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({run:run,scenario:scenario,step:step})});
-  if(!signed.ok)return{status:signed.status,body:{error:'The replay lab is unavailable on this instance.'}};
-  const {rawBody,signature}=await signed.json();
-  // Tampering alters the delivered bytes only, so the signature still belongs to the original body.
-  const sent=tamper?rawBody.slice(0,-1)+',"injected":true}':rawBody;
-  const response=await fetch('/webhooks/razorpay',{method:'POST',headers:{'content-type':'application/json','x-razorpay-signature':signature},body:sent});
-  let body={};try{body=await response.json()}catch(e){}
-  return{status:response.status,body:body};
-}
-
+// Each scenario replays inside the server against a throwaway application. The browser never sees
+// a signature or a raw body, and nothing it can press writes to the cases listed above.
 async function replay(){
   const panel=document.querySelector('#lab');
   const note=document.querySelector('#labnote');
   panel.innerHTML='<span class="muted">Delivering…</span>';
   note.textContent='';
-  const run=Date.now().toString(36);
-  const scenarios=await get('/api/lab/scenarios?run='+run);
-  if(!Array.isArray(scenarios)){panel.innerHTML='<span class="muted">The replay lab is available only in simulator mode.</span>';return}
+  const scenarios=await get('/api/lab/scenarios');
+  if(!Array.isArray(scenarios)){panel.innerHTML='<span class="muted">The replay lab is unavailable on this instance.</span>';return}
   const blocks=[];
   let passed=0,total=0;
   for(const scenario of scenarios){
-    const steps=[];
-    for(let i=0;i<scenario.steps.length;i++){
-      const step=scenario.steps[i];
-      const result=await deliver(run,scenario.key,i,step.tamper===true);
-      const ok=result.status===step.expectStatus;
-      total++;if(ok)passed++;
-      steps.push('<div class="step '+(ok?'pass':'fail')+'"><div class="what"><strong>'+esc(step.label)+'</strong> — '+esc(step.expect)+'</div>'+
-        '<div class="got">HTTP '+result.status+' (expected '+step.expectStatus+') · '+esc(JSON.stringify(result.body))+'</div></div>');
-    }
-    blocks.push('<div class="scenario"><h3>'+esc(scenario.title)+'</h3><p class="muted">'+esc(scenario.description)+'</p>'+
-      '<p class="muted">Case <code>'+esc(scenario.caseId)+'</code></p>'+steps.join('')+'</div>');
+    const response=await fetch('/api/lab/replay',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({scenario:scenario.key})});
+    if(!response.ok){blocks.push('<div class="scenario"><h3>'+esc(scenario.title)+'</h3><p class="muted">Replay unavailable (HTTP '+response.status+').</p></div>');continue}
+    const result=await response.json();
+    passed+=result.passed;total+=result.total;
+    const steps=result.steps.map(step=>'<div class="step '+(step.passed?'pass':'fail')+'"><div class="what"><strong>'+esc(step.label)+'</strong> — '+esc(step.expect)+'</div>'+
+      '<div class="got">HTTP '+step.status+' (expected '+step.expectStatus+') · '+esc(JSON.stringify(step.body))+'</div></div>').join('');
+    blocks.push('<div class="scenario"><h3>'+esc(result.title)+'</h3><p class="muted">'+esc(result.description)+'</p>'+
+      '<p class="muted">Isolated case <code>'+esc(result.caseId)+'</code>'+(result.detail?' · ended '+esc(label(result.detail.status)):' · never opened')+'</p>'+steps+'</div>');
   }
   panel.innerHTML=blocks.join('');
-  note.textContent=passed+' of '+total+' deliveries behaved as declared.';
-  // The lab drove real cases, so the list and metrics above must reflect them.
-  await refresh();
+  note.textContent=passed+' of '+total+' deliveries behaved as declared. Replays run in an isolated sandbox and change nothing above.';
 }
 document.querySelector('#replay').onclick=replay;
 refresh();
@@ -196,46 +176,6 @@ function stringValue(value: unknown): string | undefined {
 function header(request: IncomingMessage, name: string): string | undefined {
   const value = request.headers[name];
   return Array.isArray(value) ? value[0] : value;
-}
-
-/** Projects a provider webhook body into the normalized event input, or undefined when unidentifiable. */
-export function webhookInput(payload: Record<string, unknown>, fallbackId?: string): NormalizedEventInput | undefined {
-  const objectValue = (value: unknown): Record<string, unknown> =>
-    typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
-  const metadata = objectValue(payload.metadata);
-  const nestedPayload = objectValue(payload.payload);
-  const payment = objectValue(nestedPayload.payment);
-  const entity = objectValue(payment.entity);
-  const notes = objectValue(entity.notes);
-  // A customer paying a fallback link produces a payment under its own id, so the link entity is
-  // the only place the delivery names the action that offered it.
-  const paymentLink = objectValue(objectValue(nestedPayload.payment_link).entity);
-  const paymentLinkNotes = objectValue(paymentLink.notes);
-  const caseId = stringValue(payload.caseId) ?? stringValue(metadata.caseId) ?? stringValue(notes.caseId);
-  const id = stringValue(payload.id) ?? stringValue(payload.eventId) ?? fallbackId ?? stringValue(entity.id);
-  const occurredAt = stringValue(payload.occurredAt) ?? stringValue(payload.createdAt) ?? new Date().toISOString();
-  const rawType = stringValue(payload.type) ?? stringValue(payload.event);
-  const type = rawType === 'payment.failed' || rawType === 'payment_failed' ? 'payment_failed'
-    : rawType === 'payment.captured' || rawType === 'payment_succeeded' ? 'payment_succeeded'
-      : rawType === 'payment.authorized' || rawType === 'payment_pending' ? 'payment_pending'
-        : rawType === 'subscription.cancelled' || rawType === 'subscription_cancelled' ? 'subscription_cancelled'
-          : rawType === 'dispute.created' || rawType === 'dispute_opened' ? 'dispute_opened' : 'unknown';
-  if (!caseId || !id) return undefined;
-  const providerPaymentId = stringValue(payload.providerPaymentId) ?? stringValue(entity.id);
-  const providerActionReference = stringValue(payload.providerActionReference) ?? stringValue(entity.payment_link_id) ?? stringValue(paymentLink.id);
-  const actionIdempotencyKey = stringValue(payload.actionIdempotencyKey) ?? stringValue(notes.recoveryActionKey) ?? stringValue(paymentLinkNotes.recoveryActionKey);
-  // Razorpay nests the method and failure code on the payment entity, but the domain reads them
-  // off the event payload. Lift them here so a real body can still take the retry rung.
-  const method = stringValue(payload.method) ?? stringValue(entity.method);
-  const failureCode = stringValue(payload.failureCode) ?? stringValue(entity.error_code) ?? stringValue(entity.error_reason);
-  return {
-    id, type, caseId,
-    ...(providerPaymentId === undefined ? {} : { providerPaymentId }),
-    ...(providerActionReference === undefined ? {} : { providerActionReference }),
-    ...(actionIdempotencyKey === undefined ? {} : { actionIdempotencyKey }),
-    occurredAt,
-    payload: { ...payload, ...(method === undefined ? {} : { method }), ...(failureCode === undefined ? {} : { failureCode }) },
-  };
 }
 
 /** Reads the case id a `/api/cases/:id` route matched, undoing the path encoding once. */
@@ -294,7 +234,9 @@ export type CaseDetail = ReturnType<typeof caseDetail>;
  * orchestration runs, so an unsigned or unparseable delivery can never reach the workflow.
  */
 export function createRequestListener(application: RecoveryApplication): (request: IncomingMessage, response: ServerResponse) => void {
-  const { clock, evaluationRuns, provider, store, workflow } = application;
+  const { clock, config, evaluationRuns, provider, store, workflow } = application;
+  const ingress = new WebhookIngress(provider, store, workflow, clock);
+  const lab = new LabRunner();
 
   /**
    * The live projection over stored cases, always — a published batch reports beside it rather
@@ -328,41 +270,51 @@ export function createRequestListener(application: RecoveryApplication): (reques
     } catch (error) {
       return send(response, 413, JSON.stringify({ error: String(error) }));
     }
-    // Signature first: an unverified body is never parsed, stored, or orchestrated.
-    if (!provider.verifyEvent(rawBody, header(request, 'x-razorpay-signature') ?? '')) return send(response, 401, JSON.stringify({ error: 'Invalid webhook signature' }));
-    let payload: Record<string, unknown>;
     try {
-      const parsed: unknown = JSON.parse(rawBody);
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('Webhook JSON must be an object');
-      payload = parsed as Record<string, unknown>;
+      const result = await ingress.handle(rawBody, header(request, 'x-razorpay-signature') ?? '', header(request, 'x-razorpay-event-id'));
+      return send(response, result.status, JSON.stringify({ accepted: true, duplicate: result.duplicate, caseId: result.recoveryCase.id, status: result.recoveryCase.status }));
     } catch (error) {
-      return send(response, 400, JSON.stringify({ error: `Invalid webhook JSON: ${String(error)}` }));
+      if (error instanceof WebhookRejection) return send(response, error.status, JSON.stringify({ error: error.message }));
+      throw error;
     }
-    const input = webhookInput(payload, header(request, 'x-razorpay-event-id'));
-    if (!input) return send(response, 400, JSON.stringify({ error: 'Webhook is missing event id or case id' }));
-    const event = provider.normalizeEvent(input, clock.now().toISOString());
+  }
+
+  /**
+   * Registers the renewal a provider delivery will later name. This is the merchant-data seam: a
+   * webhook carries payment facts, never customer, amount, or due date, so a case must exist
+   * before its first failure arrives. Re-registering the same renewal is idempotent; registering a
+   * different renewal under an identifier already in use is a conflict, not an overwrite.
+   */
+  async function registerCase(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    let body: { id?: unknown; context?: unknown };
     try {
-      const existing = await store.get(event.caseId);
-      const duplicate = existing?.events.some((candidate) => candidate.id === event.id) ?? false;
-      if (!existing) {
-        const context = payload.context;
-        if (event.type !== 'payment_failed' || typeof context !== 'object' || context === null || Array.isArray(context)) {
-          return send(response, 404, JSON.stringify({ error: `Recovery Case not found: ${event.caseId}` }));
-        }
-        const renewal = context as Record<string, unknown>;
-        const required = ['customerId', 'subscriptionId', 'orderId', 'amount', 'currency', 'dueAt'];
-        if (!required.every((key) => key in renewal) || typeof renewal.amount !== 'number') return send(response, 400, JSON.stringify({ error: 'Initial failed webhook is missing renewal context' }));
-        await workflow.openCase(event.caseId, {
-          customerId: String(renewal.customerId), subscriptionId: String(renewal.subscriptionId), orderId: String(renewal.orderId), amount: renewal.amount, currency: String(renewal.currency), dueAt: String(renewal.dueAt),
-        });
-      }
-      const ingested = await workflow.ingestEvent(event);
-      // Ingestion is the contract with the provider; driving the loop is what makes it recover.
-      const result = duplicate ? ingested : await workflow.drive(event.caseId);
-      return send(response, duplicate ? 200 : 202, JSON.stringify({ accepted: true, duplicate, caseId: result.id, status: result.status }));
+      body = JSON.parse(await readBody(request)) as typeof body;
     } catch (error) {
-      return send(response, 422, JSON.stringify({ error: String(error) }));
+      return send(response, 400, JSON.stringify({ error: `Invalid registration: ${String(error)}` }));
     }
+    const id = typeof body.id === 'string' && body.id.trim() !== '' ? body.id : undefined;
+    if (id === undefined) return send(response, 400, JSON.stringify({ error: 'A Recovery Case id is required' }));
+    const supplied = typeof body.context === 'object' && body.context !== null && !Array.isArray(body.context) ? body.context as Record<string, unknown> : undefined;
+    if (supplied === undefined || typeof supplied.amount !== 'number') return send(response, 400, JSON.stringify({ error: 'A renewal context with a numeric amount is required' }));
+    const context: RenewalContext = {
+      customerId: String(supplied.customerId ?? ''),
+      subscriptionId: String(supplied.subscriptionId ?? ''),
+      orderId: String(supplied.orderId ?? ''),
+      amount: supplied.amount,
+      currency: String(supplied.currency ?? ''),
+      dueAt: String(supplied.dueAt ?? ''),
+    };
+    const violation = renewalContextViolation(context);
+    if (violation) return send(response, 400, JSON.stringify({ error: violation }));
+    const existing = await store.get(id);
+    if (existing) {
+      const same = (Object.keys(context) as (keyof RenewalContext)[]).every((key) => existing.context[key] === context[key]);
+      return same
+        ? send(response, 200, JSON.stringify({ caseId: existing.id, status: existing.status, registered: false }))
+        : send(response, 409, JSON.stringify({ error: `Recovery Case ${id} is already registered with a different renewal` }));
+    }
+    const opened = await workflow.openCase(id, context);
+    return send(response, 201, JSON.stringify({ caseId: opened.id, status: opened.status, registered: true }));
   }
 
   /** Applies an operator verdict to one case, or reports that the case does not exist. */
@@ -374,8 +326,19 @@ export function createRequestListener(application: RecoveryApplication): (reques
 
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? '/', 'http://localhost');
+    // The webhook carries a provider HMAC of its own, so it is the one mutation outside the
+    // control plane. Everything else that writes is gated before its body is even read.
     if (request.method === 'POST' && url.pathname === '/webhooks/razorpay') return webhook(request, response);
     const operator = /^\/api\/cases\/(?<caseId>[^/]+)\/(?<verdict>stop|escalate)$/.exec(url.pathname);
+    const mutation = request.method === 'POST'
+      && (operator?.groups !== undefined || url.pathname === '/api/expire' || url.pathname === '/api/evaluation' || url.pathname === '/api/recovery-cases');
+    if (mutation) {
+      // An instance with no configured token has no control plane at all, so the routes are not
+      // merely locked: they do not exist. Saying `401` would advertise what a token would unlock.
+      if (config.controlPlaneToken === undefined) return send(response, 404, JSON.stringify({ error: 'Not found' }));
+      if (!authorizedControlRequest(request, config.controlPlaneToken)) return send(response, 401, JSON.stringify({ error: 'A control-plane bearer token is required' }));
+    }
+    if (request.method === 'POST' && url.pathname === '/api/recovery-cases') return registerCase(request, response);
     if (request.method === 'POST' && operator?.groups) {
       return operatorAction(response, caseIdFrom(operator), operator.groups.verdict as 'stop' | 'escalate');
     }
@@ -400,37 +363,26 @@ export function createRequestListener(application: RecoveryApplication): (reques
       if (!recoveryCase) return send(response, 404, JSON.stringify({ error: `Recovery Case not found: ${caseId}` }));
       return send(response, 200, JSON.stringify(caseDetail(recoveryCase, clock.now().toISOString())));
     }
-    // The replay lab exists only when the provider can sign a delivery. The Razorpay adapter
-    // deliberately cannot, so an instance holding real credentials serves no signing endpoint.
-    if (url.pathname === '/api/lab/scenarios' || url.pathname === '/api/lab/sign') {
-      if (typeof provider.signEvent !== 'function') return send(response, 404, JSON.stringify({ error: 'The replay lab is available only in simulator mode' }));
-    }
     if (request.method === 'GET' && url.pathname === '/api/lab/scenarios') {
-      const runId = url.searchParams.get('run')?.trim() || String(Date.parse(clock.now().toISOString()));
-      return send(response, 200, JSON.stringify(labScenarios(runId, clock.now().toISOString()) as LabScenario[]));
+      return send(response, 200, JSON.stringify(labScenarios().map(({ key, title, description, steps }) => ({ key, title, description, steps: steps.map(({ label, expect, expectStatus }) => ({ label, expect, expectStatus })) }))));
     }
-    if (request.method === 'POST' && url.pathname === '/api/lab/sign') {
-      let request_: { run?: unknown; scenario?: unknown; step?: unknown };
+    if (request.method === 'POST' && url.pathname === '/api/lab/replay') {
+      // The lab runs entirely inside this process against a throwaway application, so the button
+      // stays public: a visitor can prove the boundary to themselves without a token, and still
+      // cannot reach the canonical store, the diagnosis model, or a signature.
+      let body: { scenario?: unknown };
       try {
-        request_ = JSON.parse(await readBody(request)) as typeof request_;
+        body = JSON.parse(await readBody(request)) as typeof body;
       } catch (error) {
         return send(response, 400, JSON.stringify({ error: `Invalid lab request: ${String(error)}` }));
       }
-      // The lab signs only payloads this repo authored, never bytes a caller chose. A public
-      // simulator-mode instance would otherwise let anyone mint a valid delivery and drive the
-      // dashboard — inflating recovered revenue or burying the seeded batch in synthetic cases.
-      const runId = typeof request_.run === 'string' && request_.run.trim() !== '' ? request_.run : undefined;
-      if (runId === undefined) return send(response, 400, JSON.stringify({ error: 'A lab run id is required' }));
-      const scenario = labScenarios(runId, clock.now().toISOString()).find((candidate) => candidate.key === request_.scenario);
-      if (!scenario) return send(response, 404, JSON.stringify({ error: `Unknown lab scenario: ${String(request_.scenario)}` }));
-      const step = typeof request_.step === 'number' ? scenario.steps[request_.step] : undefined;
-      if (!step) return send(response, 404, JSON.stringify({ error: `Unknown step of lab scenario ${scenario.key}: ${String(request_.step)}` }));
-      const sign = provider.signEvent;
-      if (typeof sign !== 'function') return send(response, 404, JSON.stringify({ error: 'The replay lab is available only in simulator mode' }));
-      // Returning the exact bytes it signed keeps the browser from re-serializing them, so what the
-      // boundary verifies is what the lab signed.
-      const rawBody = JSON.stringify(step.payload);
-      return send(response, 200, JSON.stringify({ rawBody, signature: sign.call(provider, rawBody) }));
+      const extra = Object.keys(body).filter((key) => key !== 'scenario');
+      if (extra.length > 0) return send(response, 400, JSON.stringify({ error: `Unexpected lab request fields: ${extra.join(', ')}` }));
+      if (typeof body.scenario !== 'string' || !LAB_SCENARIO_KEYS.includes(body.scenario)) {
+        return send(response, 404, JSON.stringify({ error: `Unknown lab scenario: ${String(body.scenario)}` }));
+      }
+      const { recoveryCase, ...replayed } = await lab.replay(body.scenario);
+      return send(response, 200, JSON.stringify({ ...replayed, detail: recoveryCase === undefined ? null : caseDetail(recoveryCase, LAB_INSTANT) }));
     }
     if (request.method === 'GET' && url.pathname === '/api/evaluation') {
       // The dashboard reloads without re-running the batch, so a refresh — or a restart —

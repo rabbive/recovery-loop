@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { DeterministicSimulator, FixedClock, RazorpayTestModeProvider, type PaymentProvider } from '../src/provider.js';
 import { addAttempt, createRecoveryCase, type RecoveryAction, type RecoveryCase } from '../src/domain.js';
@@ -73,11 +74,14 @@ function razorpay(handler?: (url: string, init: RequestInit) => Response) {
   return { requests, provider: new RazorpayTestModeProvider({ keyId: 'rzp_test_key', keySecret: 'test_secret', fetcher, clock }) };
 }
 
+/** A stable secret so the contract can sign; a real instance generates one per process. */
+const SIMULATOR_SECRET = 'contract-simulator-secret';
+
 const implementations: readonly { name: string; make: () => PaymentProvider; signature: (raw: string) => string }[] = [
   {
     name: 'DeterministicSimulator',
-    make: () => new DeterministicSimulator(new Map([['case-1', { retry: 'success', fallback: 'success', diagnosis: 'transient' }]]), clock),
-    signature: (raw) => `sim:${raw}`,
+    make: () => new DeterministicSimulator(new Map([['case-1', { retry: 'success', fallback: 'success', diagnosis: 'transient' }]]), clock, SIMULATOR_SECRET),
+    signature: (raw) => createHmac('sha256', SIMULATOR_SECRET).update(raw).digest('hex'),
   },
   {
     name: 'RazorpayTestModeProvider',

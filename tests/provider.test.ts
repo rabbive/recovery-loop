@@ -4,9 +4,11 @@ import { DeterministicSimulator } from '../src/provider.js';
 import { createRecoveryCase } from '../src/domain.js';
 
 describe('DeterministicSimulator', () => {
-  it('verifies its signed event convention and normalizes events', () => {
-    const provider = new DeterministicSimulator();
-    expect(provider.verifyEvent('payload', 'sim:payload')).toBe(true);
+  it('verifies an HMAC of its own secret and normalizes events', () => {
+    const provider = new DeterministicSimulator(new Map(), undefined, 'simulator-secret');
+    expect(provider.verifyEvent('payload', createHmac('sha256', 'simulator-secret').update('payload').digest('hex'))).toBe(true);
+    // The old convention was the body echoed back, which any visitor to a public demo could write.
+    expect(provider.verifyEvent('payload', 'sim:payload')).toBe(false);
     expect(provider.verifyEvent('payload', 'bad')).toBe(false);
     const event = provider.normalizeEvent({ id: 'e1', type: 'unknown', caseId: 'c1', occurredAt: '2026-01-01T00:00:00.000Z' }, '2026-01-01T00:00:01.000Z');
     expect(event.id).toBe('e1');

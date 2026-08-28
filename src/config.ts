@@ -4,6 +4,10 @@ export interface RuntimeConfig {
   readonly razorpayKeyId?: string;
   readonly razorpayKeySecret?: string;
   readonly razorpayWebhookSecret?: string;
+  /** Bearer token for the routes that change state. Absent means the control plane is disabled. */
+  readonly controlPlaneToken?: string;
+  /** HMAC secret the simulator verifies deliveries against. Absent means a fresh per-process secret. */
+  readonly simulatorWebhookSecret?: string;
   readonly anthropicApiKey?: string;
   readonly anthropicModel?: string;
   readonly pinccApiKey?: string;
@@ -22,6 +26,8 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Runtim
   if ((razorpayKeyId === undefined) !== (razorpayKeySecret === undefined)) throw new Error('RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET must be configured together');
   // Razorpay signs webhooks with the webhook secret, which is issued separately from the API key.
   const razorpayWebhookSecret = environment.RAZORPAY_WEBHOOK_SECRET?.trim() || undefined;
+  const controlPlaneToken = environment.CONTROL_PLANE_TOKEN?.trim() || undefined;
+  const simulatorWebhookSecret = environment.SIMULATOR_WEBHOOK_SECRET?.trim() || undefined;
   const anthropicApiKey = environment.ANTHROPIC_API_KEY?.trim() || undefined;
   const anthropicModel = environment.ANTHROPIC_MODEL?.trim() || undefined;
   const pinccApiKey = environment.PINCC_API_KEY?.trim() || undefined;
@@ -50,6 +56,8 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Runtim
     ...(razorpayKeyId === undefined ? {} : { razorpayKeyId }),
     ...(razorpayKeySecret === undefined ? {} : { razorpayKeySecret }),
     ...(razorpayWebhookSecret === undefined ? {} : { razorpayWebhookSecret }),
+    ...(controlPlaneToken === undefined ? {} : { controlPlaneToken }),
+    ...(simulatorWebhookSecret === undefined ? {} : { simulatorWebhookSecret }),
     ...(anthropicApiKey === undefined ? {} : { anthropicApiKey }),
     ...(anthropicModel === undefined ? {} : { anthropicModel }),
     ...(pinccApiKey === undefined ? {} : { pinccApiKey }),

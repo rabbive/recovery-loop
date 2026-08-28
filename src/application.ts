@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { DeterministicSimulator, FixedClock, RazorpayTestModeProvider, SystemClock, type Clock, type PaymentProvider } from './provider.js';
 import { createPostgresStore, type PostgresRecoveryStore } from './persistence.js';
 import { DeterministicPolicy, InMemoryRecoveryStore, RecoveryWorkflow, type RecoveryStore } from './recovery.js';
@@ -30,7 +31,9 @@ export function createRecoveryApplication(options: RecoveryApplicationOptions): 
   const postgresStore = options.store === undefined && options.config.databaseUrl !== undefined ? createPostgresStore(options.config.databaseUrl) : undefined;
   const store = options.store ?? postgresStore ?? new InMemoryRecoveryStore();
   const provider = options.provider ?? (options.config.razorpayKeySecret === undefined
-    ? new DeterministicSimulator(new Map(), clock)
+    // Without a configured secret the simulator invents one per process, so a public instance
+    // accepts no delivery anybody outside it could have signed.
+    ? new DeterministicSimulator(new Map(), clock, options.config.simulatorWebhookSecret ?? randomBytes(32).toString('hex'))
     : new RazorpayTestModeProvider({
       keyId: options.config.razorpayKeyId ?? '',
       keySecret: options.config.razorpayKeySecret,

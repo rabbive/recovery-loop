@@ -7,7 +7,8 @@ import { FixedClock } from '../src/provider.js';
 import { InMemoryRecoveryStore } from '../src/recovery.js';
 import { InMemoryEvaluationRunStore, generateEvaluationCases, runEvaluation, toEvaluationRun, type EvaluationRun } from '../src/evaluation.js';
 
-const config = { port: 0, logLevel: 'info' as const };
+const CONTROL_TOKEN = 'evaluation-store-token';
+const config = { port: 0, logLevel: 'info' as const, controlPlaneToken: CONTROL_TOKEN };
 
 async function run(seed: number): Promise<EvaluationRun> {
   return toEvaluationRun(await runEvaluation(generateEvaluationCases(50, seed)), '2026-01-01T00:00:00.000Z');
@@ -36,7 +37,7 @@ describe('published figures across a restart', () => {
     const evaluationRuns = new InMemoryEvaluationRunStore();
     const store = new InMemoryRecoveryStore();
     const first = await listen(store, evaluationRuns);
-    const published = await fetch(`${first.origin}/api/evaluation`, { method: 'POST' }).then((response) => response.json()) as { metrics: { recoveredAmount: number } };
+    const published = await fetch(`${first.origin}/api/evaluation`, { method: 'POST', headers: { authorization: `Bearer ${CONTROL_TOKEN}` } }).then((response) => response.json()) as { metrics: { recoveredAmount: number } };
     const publishedMetrics = await fetch(`${first.origin}/api/metrics`).then((response) => response.json());
     await first.close();
 

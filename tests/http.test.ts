@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -6,7 +7,9 @@ import { createRequestListener, type CaseDetail, type CaseSummary } from '../src
 import { DeterministicSimulator, FixedClock } from '../src/provider.js';
 import { InMemoryRecoveryStore } from '../src/recovery.js';
 
-const config = { port: 0, logLevel: 'info' as const };
+const SIMULATOR_SECRET = 'test-simulator-secret';
+const CONTROL_TOKEN = 'test-control-token';
+const config = { port: 0, logLevel: 'info' as const, simulatorWebhookSecret: SIMULATOR_SECRET, controlPlaneToken: CONTROL_TOKEN };
 const context = { customerId: 'customer-1', subscriptionId: 'subscription-1', orderId: 'order-1', amount: 1200, currency: 'INR', dueAt: '2026-01-01T00:00:00.000Z' };
 
 let server: Server;
@@ -30,22 +33,47 @@ async function post(body: unknown, signature?: string): Promise<Response> {
   const raw = typeof body === 'string' ? body : JSON.stringify(body);
   return fetch(`${origin}/webhooks/razorpay`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-razorpay-signature': signature ?? `sim:${raw}` },
+    headers: { 'content-type': 'application/json', 'x-razorpay-signature': signature ?? createHmac('sha256', SIMULATOR_SECRET).update(raw).digest('hex') },
     body: raw,
   });
 }
 
+/** The control plane, exercised the way an operator's tooling would. */
+async function control(path: string, body?: unknown, token: string | undefined = CONTROL_TOKEN): Promise<Response> {
+  return fetch(`${origin}${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...(token === undefined ? {} : { authorization: `Bearer ${token}` }) },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+}
+
+/** Registers the renewal before any delivery names it, because a webhook may not invent one. */
+async function register(id = 'case-1', renewal = context): Promise<Response> {
+  return control('/api/recovery-cases', { id, context: renewal });
+}
+
 function failedRenewal(id = 'event-1') {
-  return { id, type: 'payment.failed', caseId: 'case-1', occurredAt: '2026-01-01T00:00:00.000Z', context, payload: { payment: { entity: { method: 'recurring_mandate' } } } };
+  return { id, type: 'payment.failed', caseId: 'case-1', occurredAt: '2026-01-01T00:00:00.000Z', payload: { payment: { entity: { method: 'recurring_mandate' } } } };
 }
 
 describe('webhook boundary', () => {
-  it('opens a Recovery Case from a signed failed-renewal delivery', async () => {
+  it('drives a registered Recovery Case from a signed failed-renewal delivery', async () => {
+    await register();
+
     const response = await post(failedRenewal());
 
     expect(response.status).toBe(202);
     expect(await response.json()).toMatchObject({ accepted: true, duplicate: false, caseId: 'case-1' });
     expect((await store.get('case-1'))?.context.amount).toBe(1200);
+  });
+
+  it('refuses a delivery for a renewal nobody registered', async () => {
+    // Renewal context is merchant data. If a signed body could carry it, whoever holds the webhook
+    // secret could invent customers and amounts, and every published figure would be theirs to set.
+    const response = await post({ ...failedRenewal(), context });
+
+    expect(response.status).toBe(404);
+    expect(await store.all()).toHaveLength(0);
   });
 
   it('rejects an invalid signature without creating a case, an event, or an action', async () => {
@@ -57,13 +85,14 @@ describe('webhook boundary', () => {
   });
 
   it('rejects a body whose signature was computed over different content', async () => {
-    const response = await post(failedRenewal(), `sim:${JSON.stringify(failedRenewal('other'))}`);
+    const response = await post(failedRenewal(), createHmac('sha256', SIMULATOR_SECRET).update(JSON.stringify(failedRenewal('other'))).digest('hex'));
 
     expect(response.status).toBe(401);
     expect(await store.all()).toHaveLength(0);
   });
 
   it('treats a redelivered event as one logical event and adds no second attempt or action', async () => {
+    await register();
     const first = await post(failedRenewal());
     expect(await first.json()).toMatchObject({ status: 'retry_scheduled' });
 
@@ -78,6 +107,7 @@ describe('webhook boundary', () => {
   });
 
   it('takes the retry rung for a Razorpay-shaped body that carries a recurring mandate', async () => {
+    await register();
     await post(failedRenewal());
 
     const recoveryCase = await store.get('case-1');
@@ -86,8 +116,6 @@ describe('webhook boundary', () => {
   });
 
   it('rejects malformed JSON', async () => {
-    // No trailing whitespace: the simulator's signature is the raw body echoed in a header,
-    // and HTTP header values are trimmed in transit.
     const response = await post('{"id":"event-1"');
 
     expect(response.status).toBe(400);
@@ -111,6 +139,7 @@ describe('webhook boundary', () => {
   });
 
   it('correlates a delivery to an existing case through Razorpay payment notes', async () => {
+    await register();
     await post(failedRenewal());
 
     const response = await post({
@@ -129,14 +158,27 @@ describe('webhook boundary', () => {
     expect(await store.all()).toHaveLength(0);
   });
 
-  it('refuses to open a case when the renewal context is incomplete', async () => {
-    const response = await post({ ...failedRenewal(), context: { customerId: 'customer-1' } });
+  it('refuses to register a renewal whose context is incomplete', async () => {
+    const response = await control('/api/recovery-cases', { id: 'case-1', context: { customerId: 'customer-1', amount: 1200 } });
 
     expect(response.status).toBe(400);
     expect(await store.all()).toHaveLength(0);
   });
 
+  it('registers a renewal once, tolerates the same registration again, and refuses a different one', async () => {
+    expect((await register()).status).toBe(201);
+    const again = await register();
+    expect(again.status).toBe(200);
+    expect(await again.json()).toMatchObject({ registered: false });
+
+    const conflicting = await register('case-1', { ...context, amount: 9999 });
+
+    expect(conflicting.status).toBe(409);
+    expect((await store.get('case-1'))?.context.amount).toBe(1200);
+  });
+
   it('records an unsupported event type without acting on the case', async () => {
+    await register();
     await post(failedRenewal());
 
     const before = await store.get('case-1');
@@ -151,6 +193,7 @@ describe('webhook boundary', () => {
   });
 
   it('serves the dashboard and the case and metric projections', async () => {
+    await register();
     await post(failedRenewal());
 
     const [dashboard, cases, metrics] = await Promise.all([fetch(origin), fetch(`${origin}/api/cases`), fetch(`${origin}/api/metrics`)]);
@@ -163,10 +206,11 @@ describe('webhook boundary', () => {
   it('stops counting a case as revenue at risk once it reaches a terminal outcome', async () => {
     // CONTEXT.md: Revenue at Risk "is not counted after the case reaches a terminal outcome."
     // An escalated renewal is a human's problem now, not an open recovery opportunity.
+    await register();
     await post(failedRenewal());
     expect(await fetch(`${origin}/api/metrics`).then((response) => response.json())).toMatchObject({ revenueAtRisk: 1200 });
 
-    await fetch(`${origin}/api/cases/case-1/escalate`, { method: 'POST' });
+    await control('/api/cases/case-1/escalate');
 
     expect(await fetch(`${origin}/api/metrics`).then((response) => response.json())).toMatchObject({ revenueAtRisk: 0, escalated: 1 });
   });
@@ -178,9 +222,10 @@ describe('webhook boundary', () => {
 
 describe('operator surface', () => {
   it('stops a live case on request', async () => {
+    await register();
     await post(failedRenewal());
 
-    const response = await fetch(`${origin}/api/cases/case-1/stop`, { method: 'POST' });
+    const response = await control('/api/cases/case-1/stop');
 
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ caseId: 'case-1', status: 'stopped', outcome: 'stopped' });
@@ -188,21 +233,36 @@ describe('operator surface', () => {
   });
 
   it('escalates a live case on request', async () => {
+    await register();
     await post(failedRenewal());
 
-    const response = await fetch(`${origin}/api/cases/case-1/escalate`, { method: 'POST' });
+    const response = await control('/api/cases/case-1/escalate');
 
     expect(await response.json()).toMatchObject({ status: 'escalated', outcome: 'escalated' });
   });
 
   it('reports an operator verdict on a case that does not exist', async () => {
-    expect((await fetch(`${origin}/api/cases/case-nope/stop`, { method: 'POST' })).status).toBe(404);
+    expect((await control('/api/cases/case-nope/stop')).status).toBe(404);
+  });
+
+  it('refuses every state-changing route without the control-plane token', async () => {
+    await register();
+    await post(failedRenewal());
+
+    for (const path of ['/api/cases/case-1/stop', '/api/cases/case-1/escalate', '/api/expire', '/api/evaluation', '/api/recovery-cases']) {
+      expect((await control(path, { id: 'case-2', context }, 'wrong-token')).status).toBe(401);
+      expect((await fetch(`${origin}${path}`, { method: 'POST' })).status).toBe(401);
+    }
+    // Nothing moved: the token is checked before the body is read or the case is looked up.
+    expect((await store.get('case-1'))?.status).toBe('retry_scheduled');
+    expect(await store.get('case-2')).toBeUndefined();
   });
 
   it('sweeps lapsed fallback links and reports the cases it exhausted', async () => {
+    await register();
     await post(failedRenewal());
 
-    const response = await fetch(`${origin}/api/expire`, { method: 'POST' });
+    const response = await control('/api/expire');
 
     // Nothing has been offered a link yet, so the sweep exhausts nothing.
     expect(response.status).toBe(200);
@@ -213,6 +273,7 @@ describe('operator surface', () => {
 
 describe('case drill-down', () => {
   it('projects one case from failure through diagnosis, policy, actions, and audit timeline', async () => {
+    await register();
     await post(failedRenewal());
 
     const response = await fetch(`${origin}/api/cases/case-1`);
@@ -236,6 +297,7 @@ describe('case drill-down', () => {
   });
 
   it('previews no fallback message while the case is still on the retry rung', async () => {
+    await register();
     await post(failedRenewal());
 
     const detail = await fetch(`${origin}/api/cases/case-1`).then((response) => response.json()) as CaseDetail;
@@ -252,6 +314,7 @@ describe('case drill-down', () => {
   });
 
   it('filters the case list by status', async () => {
+    await register();
     await post(failedRenewal());
 
     const [matching, other] = await Promise.all([
@@ -270,8 +333,9 @@ describe('case drill-down', () => {
   });
 
   it('carries the customer and outcome the case list is filtered and read by', async () => {
+    await register();
     await post(failedRenewal());
-    await fetch(`${origin}/api/cases/case-1/stop`, { method: 'POST' });
+    await control('/api/cases/case-1/stop');
 
     expect(await fetch(`${origin}/api/cases`).then((response) => response.json())).toMatchObject([
       { id: 'case-1', status: 'stopped', outcome: 'stopped', customerId: 'customer-1', currency: 'INR' },
@@ -288,7 +352,7 @@ describe('evaluation projection', () => {
   });
 
   it('replays the last batch without re-running it', async () => {
-    const ran = await fetch(`${origin}/api/evaluation`, { method: 'POST' }).then((response) => response.json()) as { metrics: unknown; results: unknown[] };
+    const ran = await control('/api/evaluation').then((response) => response.json()) as { metrics: unknown; results: unknown[] };
 
     const replayed = await fetch(`${origin}/api/evaluation`).then((response) => response.json()) as { available: boolean; metrics: unknown; results: unknown[] };
 
@@ -298,7 +362,7 @@ describe('evaluation projection', () => {
   });
 
   it('carries the ground truth and the runtime result the evaluation panel compares', async () => {
-    const batch = await fetch(`${origin}/api/evaluation`, { method: 'POST' }).then((response) => response.json()) as { results: Record<string, unknown>[] };
+    const batch = await control('/api/evaluation').then((response) => response.json()) as { results: Record<string, unknown>[] };
 
     // Expected safe action and outcome are ground truth; the authorized action and status are
     // what the loop actually did. The panel puts them side by side, so both must be projected.
@@ -317,11 +381,12 @@ describe('evaluation projection', () => {
 
 describe('live and published figures', () => {
   it('keeps reporting live cases after a batch is published, and reports the batch beside them', async () => {
+    await register();
     await post(failedRenewal());
     const beforeBatch = await fetch(`${origin}/api/metrics`).then((response) => response.json()) as Record<string, unknown>;
     expect(beforeBatch).toMatchObject({ totalCases: 1, revenueAtRisk: 1200, batch: null });
 
-    await fetch(`${origin}/api/evaluation`, { method: 'POST' });
+    await control('/api/evaluation');
 
     const afterBatch = await fetch(`${origin}/api/metrics`).then((response) => response.json()) as { totalCases: number; batch: { seed: number; totalCases: number } | null };
     // The batch drove 60 more cases through the loop, so the live projection grows with them —
@@ -329,8 +394,9 @@ describe('live and published figures', () => {
     expect(afterBatch.totalCases).toBe(61);
     expect(afterBatch.batch).toMatchObject({ seed: 42, totalCases: 60, synthetic: true });
 
-    // A case ingested after the batch still moves the live figures.
-    await post({ id: 'event-9', type: 'payment.failed', caseId: 'case-9', occurredAt: '2026-01-01T00:09:00.000Z', context, payload: { payment: { entity: { method: 'card' } } } });
+    // A case registered and ingested after the batch still moves the live figures.
+    await register('case-9');
+    await post({ id: 'event-9', type: 'payment.failed', caseId: 'case-9', occurredAt: '2026-01-01T00:09:00.000Z', payload: { payment: { entity: { method: 'card' } } } });
 
     expect(await fetch(`${origin}/api/metrics`).then((response) => response.json())).toMatchObject({ totalCases: 62 });
   });
@@ -338,6 +404,7 @@ describe('live and published figures', () => {
 
 describe('dashboard demo path', () => {
   it('walks failure, diagnosis, policy, operator verdict, and audit through the projections the dashboard reads', async () => {
+    await register();
     await post(failedRenewal());
 
     const listed = await fetch(`${origin}/api/cases?status=retry_scheduled`).then((response) => response.json()) as CaseSummary[];
@@ -345,7 +412,7 @@ describe('dashboard demo path', () => {
     expect(opened.diagnosis?.recommendedAction).toBe('retry');
     expect(opened.decisions.some((decision) => decision.allowed)).toBe(true);
 
-    await fetch(`${origin}/api/cases/case-1/escalate`, { method: 'POST' });
+    await control('/api/cases/case-1/escalate');
 
     const after = await fetch(`${origin}/api/cases/case-1`).then((response) => response.json()) as CaseDetail;
     expect(after.status).toBe('escalated');
@@ -355,6 +422,7 @@ describe('dashboard demo path', () => {
   });
 
   it('advances a simulated result and shows recovered metrics and audit events through the same projections', async () => {
+    await register();
     await post(failedRenewal());
     const authorized = await fetch(`${origin}/api/cases/case-1`).then((response) => response.json()) as CaseDetail;
     expect(authorized.actions.map((action) => action.kind)).toEqual(['retry']);
@@ -373,6 +441,7 @@ describe('dashboard demo path', () => {
   it('credits a link a customer paid, reading the action identity out of Razorpay\'s own body', async () => {
     // Razorpay reports a paid link as a payment under its own id, naming the link in a sibling
     // entity. Without reading that, the money looks like a payment nothing on the case can claim.
+    await register();
     await post(failedRenewal());
     const authorized = await store.get('case-1');
     expect(authorized?.actions.find((candidate) => candidate.kind === 'retry')?.providerReference).toBe('sim_retry_case-1');
@@ -401,11 +470,16 @@ describe('dashboard demo path', () => {
     expect(() => new Function(script)).not.toThrow();
   });
 
-  it('serves a dashboard that reaches the drill-down, filter, and operator endpoints', async () => {
+  it('keeps the control plane out of the page a visitor is served', async () => {
     const html = await fetch(origin).then((response) => response.text());
 
-    for (const fragment of ['/api/cases/', '/api/metrics', '/api/evaluation', 'status=', '/stop', '/escalate']) {
+    // The read-only projections the dashboard is built from are all still there.
+    for (const fragment of ['/api/cases/', '/api/metrics', '/api/evaluation', 'status=', '/api/lab/replay']) {
       expect(html).toContain(fragment);
+    }
+    // Nothing a visitor can press writes, and the token never reaches the browser at all.
+    for (const fragment of ['/stop', '/escalate', '/api/expire', '/api/recovery-cases', CONTROL_TOKEN, 'Bearer']) {
+      expect(html).not.toContain(fragment);
     }
   });
 
@@ -448,7 +522,7 @@ describe('fallback message preview', () => {
 
   beforeEach(async () => {
     // The retry is unsupported for this case, so policy steps the case down to the link rung.
-    const provider = new DeterministicSimulator(new Map([['case-1', { retry: 'unsupported', fallback: 'success', diagnosis: 'transient' }]]), new FixedClock('2026-01-01T00:00:00.000Z'));
+    const provider = new DeterministicSimulator(new Map([['case-1', { retry: 'unsupported', fallback: 'success', diagnosis: 'transient' }]]), new FixedClock('2026-01-01T00:00:00.000Z'), SIMULATOR_SECRET);
     const application = createRecoveryApplication({ config, clock: new FixedClock('2026-01-01T00:00:00.000Z'), store: new InMemoryRecoveryStore(), provider });
     linkServer = createServer(createRequestListener(application));
     await new Promise<void>((resolve) => linkServer.listen(0, '127.0.0.1', resolve));
@@ -460,8 +534,13 @@ describe('fallback message preview', () => {
   });
 
   async function openCase(): Promise<void> {
+    await fetch(`${linkOrigin}/api/recovery-cases`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${CONTROL_TOKEN}` },
+      body: JSON.stringify({ id: 'case-1', context }),
+    });
     const raw = JSON.stringify(failedRenewal());
-    await fetch(`${linkOrigin}/webhooks/razorpay`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-razorpay-signature': `sim:${raw}` }, body: raw });
+    await fetch(`${linkOrigin}/webhooks/razorpay`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-razorpay-signature': createHmac('sha256', SIMULATOR_SECRET).update(raw).digest('hex') }, body: raw });
   }
 
   it('previews the fallback message once a link exists, and marks it undeliverable', async () => {

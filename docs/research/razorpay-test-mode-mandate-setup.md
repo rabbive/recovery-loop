@@ -439,6 +439,36 @@ Constraints that are documented as *product* rules, not Test-Mode-specific, but 
 
 ---
 
+## Empirical result: card mandate registration is refused on this account (2026-08-28)
+
+Reproduced today against this project's live Test Mode credentials, superseding the uncertainty
+below for step 1 of the proof gate. Three independent paths were tried:
+
+1. `POST /v1/orders` with `method: "card"`, a `customer_id`, and a `token` block
+   (`max_amount`/`expire_at`/`frequency`) — **succeeds without error** and returns the order with the
+   `token` block echoed back. Creating the order artifact is not gated.
+2. Standard Checkout against that order, loaded via `checkout.js` with
+   `order_id`, `customer_id`, and `recurring: true` — the documented mechanism (§1.A Step 3) — **fails
+   at the payment-method selection screen** with the dialog **"No appropriate payment method
+   found."** No card entry field is ever shown; the checkout cannot proceed to authorize anything.
+3. A hosted registration link created via `POST /v1/invoices` (`type: "link"`) with the same `token`
+   block — the invoice is issued and shows a valid `short_url`, but the **`token` field is silently
+   dropped**: the order Razorpay auto-creates behind the link carries no `token` block at all, so
+   paying that link (which does succeed, as a plain one-time payment) produces a payment with no
+   `token_id`, no `customer_id`, and no `recurring` field — not a mandate under any interpretation,
+   and not something `chargeableMandateAttempt`'s downstream `readMandate` guard would accept.
+
+**Conclusion:** recurring card-mandate registration is not enabled on this account, independent of
+integration correctness. The order/token JSON can be constructed freely, but Standard Checkout
+itself refuses to offer a payment method once `recurring: true` is requested — the same refusal the
+account showed two days earlier when this document was first researched. This is an account-level
+capability question that only Razorpay support can change; there is no self-service path found in
+the API or dashboard that enables it. `RAZORPAY_RECURRING_RETRY_ENABLED` stays `false` and step 1 of
+the proof gate below (below) is the blocker: nothing past it can be attempted until Razorpay confirms
+recurring card payments are enabled for this account.
+
+---
+
 ## Riskiest unknown
 
 **How to get a `failed` payment on an authorized Test Mode token — the exact input `chargeableMandateAttempt` requires.**
@@ -498,6 +528,12 @@ dates, sanitized request and response shapes, and identifiers — never secrets,
 customer contact details.
 
 1. Obtain Razorpay confirmation that recurring card payments are enabled on the Test Mode account.
+   **Blocked as of 2026-08-28** — see [Empirical result](#empirical-result-card-mandate-registration-is-refused-on-this-account-2026-08-28)
+   above. Standard Checkout itself refuses to offer a payment method for an order requesting
+   `recurring: true`, on a freshly created order, tried three independent ways. This is not an
+   integration defect in this repo: the refusal happens before any card is entered. Resolving it
+   requires a Razorpay support request to enable recurring card payments on this Test Mode account;
+   nothing in the API or dashboard self-service surface enables it.
 2. Create a Test Mode customer and complete a card-mandate authorization transaction.
 3. Fetch the customer token and record a sanitized response showing a confirmed recurring mandate.
 4. Create a subsequent Test Mode payment using the documented recurring API and record its payment id.
@@ -515,5 +551,7 @@ customer contact details.
 10. Only then set `RAZORPAY_RECURRING_RETRY_ENABLED=true`, and only on a non-public Test Mode
     integration app. The public demo keeps simulator payments and the proven fallback-link path.
 
-**Current state: not completed; recurring retry is disabled.** No step above has been performed, so
-nothing in this repository should be read as evidence that a recurring charge has succeeded.
+**Current state: not completed; recurring retry is disabled.** Step 1 was attempted and failed —
+see [Empirical result](#empirical-result-card-mandate-registration-is-refused-on-this-account-2026-08-28).
+Steps 2 onward cannot proceed until Razorpay enables recurring card payments on this account. Nothing
+in this repository should be read as evidence that a recurring charge has succeeded.

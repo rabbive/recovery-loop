@@ -4,6 +4,7 @@ import { createRecoveryApplication, type RecoveryApplication } from './applicati
 import { loadConfig, type RuntimeConfig } from './config.js';
 import { createRequestListener } from './http.js';
 import { publishSeededBatch } from './evaluation.js';
+import { startExpiryScheduler } from './expiry.js';
 
 export interface RecoveryServer {
   readonly application: RecoveryApplication;
@@ -44,6 +45,9 @@ export async function bootstrap(recoveryServer: RecoveryServer = createRecoveryS
   const { application, server } = recoveryServer;
   if (application.postgresStore) await application.postgresStore.initialize();
   await publishSeededBatchIfMissing(application);
+  // Lapsed fallback links are retired for as long as this instance is serving, and no longer.
+  const scheduler = startExpiryScheduler(application.expirySweeper);
+  server.once('close', () => scheduler.stop());
   server.listen(application.config.port, () => console.log(`Recovery Loop listening on http://localhost:${application.config.port}`));
 }
 

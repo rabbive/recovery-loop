@@ -159,6 +159,25 @@ describe('recovery orchestration', () => {
     expect(expired.audit.map((entry) => entry.type)).toContain('fallback_link_expired');
   });
 
+  it('reconciles one coherent case when expiry and the payment race each other', async () => {
+    // The sweeper and a webhook can reach the same case at the same instant. Both are read-modify-
+    // write over the whole aggregate, so without the case lock one would overwrite the other's
+    // audit entries — and the renewal would be exhausted and recovered depending on who wrote last.
+    const { workflow, provider, clock, store } = setup({ retry: 'failure', fallback: 'success', diagnosis: 'transient' });
+    await openFailedCase(workflow, provider);
+    await advance(workflow, true);
+    await advance(workflow);
+    clock.advance(24 * 60 * 60 * 1000);
+    const paid = provider.normalizeEvent({ id: 'event-9', type: 'payment_succeeded', caseId: 'case-1', providerPaymentId: 'pay_link_case-1', providerActionReference: 'sim_link_case-1', occurredAt: '2026-01-02T00:00:01.000Z' }, '2026-01-02T00:00:02.000Z');
+
+    await Promise.all([workflow.expireLapsedFallbackLink('case-1'), workflow.ingestEvent(paid)]);
+
+    const settled = (await store.get('case-1'))!;
+    expect(settled.status).toBe('recovered');
+    expect(settled.recoveredAmount).toBe(1200);
+    expect(new Set(settled.audit.map((entry) => entry.id)).size).toBe(settled.audit.length);
+  });
+
   it('still reconciles a payment that lands after the link expired', async () => {
     const { workflow, provider, clock } = setup({ retry: 'failure', fallback: 'success', diagnosis: 'transient' });
     await openFailedCase(workflow, provider);

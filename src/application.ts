@@ -4,6 +4,7 @@ import { createPostgresStore, type PostgresRecoveryStore } from './persistence.j
 import { DeterministicPolicy, InMemoryRecoveryStore, RecoveryWorkflow, type RecoveryStore } from './recovery.js';
 import { AnthropicDiagnosisEngine, AnthropicMessagesModel, FixtureDiagnosisEngine, ModelDiagnosisEngine, OpenAICompatibleChatModel, type DiagnosisEngine } from './diagnosis.js';
 import { InMemoryEvaluationRunStore, type EvaluationRunStore } from './evaluation.js';
+import { ExpirySweeper } from './expiry.js';
 import type { RuntimeConfig } from './config.js';
 
 export interface RecoveryApplication {
@@ -14,6 +15,7 @@ export interface RecoveryApplication {
   readonly diagnosisEngine: DiagnosisEngine;
   readonly workflow: RecoveryWorkflow;
   readonly evaluationRuns: EvaluationRunStore;
+  readonly expirySweeper: ExpirySweeper;
   readonly postgresStore?: PostgresRecoveryStore;
 }
 
@@ -66,5 +68,5 @@ export function createRecoveryApplication(options: RecoveryApplicationOptions): 
   const workflow = new RecoveryWorkflow(store, provider, diagnosisEngine, new DeterministicPolicy(), clock);
   // Published batch figures live wherever the cases live, so a restart shows the same numbers.
   const evaluationRuns = options.evaluationRuns ?? postgresStore?.evaluationRuns ?? new InMemoryEvaluationRunStore();
-  return { config: options.config, clock, store, provider, diagnosisEngine, workflow, evaluationRuns, ...(postgresStore === undefined ? {} : { postgresStore }) };
+  return { config: options.config, clock, store, provider, diagnosisEngine, workflow, evaluationRuns, expirySweeper: new ExpirySweeper(store, workflow, clock), ...(postgresStore === undefined ? {} : { postgresStore }) };
 }

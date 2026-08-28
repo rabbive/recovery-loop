@@ -234,7 +234,7 @@ export type CaseDetail = ReturnType<typeof caseDetail>;
  * orchestration runs, so an unsigned or unparseable delivery can never reach the workflow.
  */
 export function createRequestListener(application: RecoveryApplication): (request: IncomingMessage, response: ServerResponse) => void {
-  const { clock, config, evaluationRuns, provider, store, workflow } = application;
+  const { clock, config, evaluationRuns, expirySweeper, provider, store, workflow } = application;
   const ingress = new WebhookIngress(provider, store, workflow, clock);
   const lab = new LabRunner();
 
@@ -343,9 +343,9 @@ export function createRequestListener(application: RecoveryApplication): (reques
       return operatorAction(response, caseIdFrom(operator), operator.groups.verdict as 'stop' | 'escalate');
     }
     if (request.method === 'POST' && url.pathname === '/api/expire') {
-      // Nothing else retires a lapsed fallback link, so the sweep is the loop's closing step.
-      const swept = await Promise.all((await store.all()).map((recoveryCase) => workflow.expireLapsedFallbackLink(recoveryCase.id)));
-      return send(response, 200, JSON.stringify({ expired: swept.filter((recoveryCase) => recoveryCase.status === 'exhausted').map((recoveryCase) => recoveryCase.id) }));
+      // The same bounded sweep the scheduler runs. This route exists for operational verification;
+      // it is not what keeps lapsed links from accumulating.
+      return send(response, 200, JSON.stringify(await expirySweeper.sweep()));
     }
     if (request.method === 'GET' && url.pathname === '/') return send(response, 200, dashboard(), 'text/html');
     if (request.method === 'GET' && url.pathname === '/api/metrics') return send(response, 200, JSON.stringify(await metrics()));

@@ -264,9 +264,9 @@ describe('operator surface', () => {
 
     const response = await control('/api/expire');
 
-    // Nothing has been offered a link yet, so the sweep exhausts nothing.
+    // Nothing has been offered a link yet, so the sweep finds nothing due and exhausts nothing.
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ expired: [] });
+    expect(await response.json()).toEqual({ inspected: 0, expiredCaseIds: [], moreDue: false });
     expect((await store.get('case-1'))?.status).toBe('retry_scheduled');
   });
 });

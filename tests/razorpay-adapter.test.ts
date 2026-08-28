@@ -24,8 +24,10 @@ function action(kind: RecoveryAction['kind'], caseId = 'case-1'): RecoveryAction
 interface Recorded { readonly method: string; readonly url: string; readonly body: Record<string, unknown> }
 
 /**
- * A Test Mode double for the endpoints the recurring retry uses: the original payment lookup,
- * order creation keyed by receipt, the payments of an order, and the recurring charge itself.
+ * A Test Mode double for the endpoints the recurring retry uses: the original payment lookup (which
+ * carries the order id the retry re-initiates against, per Razorpay's own documented semantics),
+ * the payments already sitting on that order, and the recurring charge itself. No order is ever
+ * created by a retry — it always re-initiates against the order the failed renewal already used.
  */
 function razorpay(overrides: {
   payment?: Record<string, unknown> | null;
@@ -35,11 +37,10 @@ function razorpay(overrides: {
   chargeStatus?: string;
 } = {}) {
   const requests: Recorded[] = [];
-  const orders = new Map<string, string>();
   const orderPayments = new Map<string, string>();
   let issued = 0;
   const payment = overrides.payment === undefined
-    ? { id: 'pay_original', recurring: true, token_id: 'token_1', customer_id: 'cust_1', email: 'renewal@example.com', contact: '+919900000000', method: 'card' }
+    ? { id: 'pay_original', order_id: 'order_original', recurring: true, token_id: 'token_1', customer_id: 'cust_1', email: 'renewal@example.com', contact: '+919900000000', method: 'card' }
     : overrides.payment;
   const fetcher = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
@@ -49,17 +50,6 @@ function razorpay(overrides: {
     if (method === 'GET' && url.pathname === '/v1/payments/pay_original') {
       return new Response(JSON.stringify(payment ?? { error: { description: 'payment not found' } }), { status: overrides.paymentStatus ?? (payment ? 200 : 400) });
     }
-    if (method === 'GET' && url.pathname === '/v1/orders') {
-      const receipt = url.searchParams.get('receipt') ?? '';
-      const existing = orders.get(receipt);
-      return new Response(JSON.stringify({ items: existing === undefined ? [] : [{ id: existing, receipt }] }), { status: 200 });
-    }
-    if (method === 'POST' && url.pathname === '/v1/orders') {
-      issued += 1;
-      const id = `order_Rz${issued}`;
-      orders.set(String(body.receipt ?? ''), id);
-      return new Response(JSON.stringify({ id, receipt: body.receipt, amount: body.amount, currency: body.currency }), { status: 200 });
-    }
     const ofOrder = /^\/v1\/orders\/(?<orderId>[^/]+)\/payments$/.exec(url.pathname);
     if (method === 'GET' && ofOrder?.groups) {
       const existing = orderPayments.get(ofOrder.groups.orderId ?? '');
@@ -67,6 +57,7 @@ function razorpay(overrides: {
     }
     if (method === 'POST' && url.pathname === '/v1/payments/create/recurring') {
       if (overrides.recurring) return new Response(JSON.stringify(overrides.recurring.body), { status: overrides.recurring.status });
+      issued += 1;
       const id = `pay_retry${issued}`;
       orderPayments.set(String(body.order_id ?? ''), id);
       return new Response(JSON.stringify({ razorpay_payment_id: id, razorpay_order_id: body.order_id }), { status: 200 });
@@ -77,22 +68,19 @@ function razorpay(overrides: {
 }
 
 describe('Razorpay Test Mode recurring retry', () => {
-  it('charges the authorized mandate again through an order carrying the action identity', async () => {
+  it('charges the authorized mandate again against the order the failed renewal already used', async () => {
+    // Razorpay's own retry semantics say "for the same order id" — creating a fresh order per
+    // retry would not be the same operation, and would leave the 36-hour re-initiation window
+    // Razorpay describes unmodelled.
     const { requests, provider } = razorpay();
     const result = await provider.submitRetry(mandateCase(), action('retry'));
     expect(result.status).toBe('submitted');
     expect(result.providerReference).toBe('pay_retry1');
-    const order = requests.find((request) => request.method === 'POST' && request.url.endsWith('/v1/orders'));
-    expect(order?.body.receipt).toBe('case-1:retry');
-    expect(order?.body.amount).toBe(4999);
-    expect(order?.body.currency).toBe('INR');
-    // The notes are how a later webhook names this action, so recovered revenue can be attributed.
-    expect(order?.body.notes).toMatchObject({ caseId: 'case-1', recoveryActionKey: 'case-1:retry' });
+    expect(requests.some((request) => request.method === 'POST' && request.url.endsWith('/v1/orders'))).toBe(false);
     const charge = requests.find((request) => request.url.endsWith('/v1/payments/create/recurring'));
-    expect(charge?.body).toMatchObject({ token: 'token_1', customer_id: 'cust_1', email: 'renewal@example.com', contact: '+919900000000', order_id: 'order_Rz1', currency: 'INR', amount: 4999, recurring: true });
+    expect(charge?.body).toMatchObject({ token: 'token_1', customer_id: 'cust_1', email: 'renewal@example.com', contact: '+919900000000', order_id: 'order_original', currency: 'INR', amount: 4999, recurring: true });
     // `recurring` is a boolean because that is the type Razorpay's API reference gives it. Recurring
     // is not enabled on our Test Mode account, so this shape has never been exercised live.
-
   });
 
   /**
@@ -108,7 +96,7 @@ describe('Razorpay Test Mode recurring retry', () => {
     ['number 1', { recurring: 1 }],
   ])('charges the mandate when the payment\'s recurring flag is %s', async (_label, flag) => {
     const { provider } = razorpay({
-      payment: { id: 'pay_original', token_id: 'token_1', customer_id: 'cust_1', email: 'renewal@example.com', contact: '+919900000000', method: 'card', ...flag },
+      payment: { id: 'pay_original', order_id: 'order_original', token_id: 'token_1', customer_id: 'cust_1', email: 'renewal@example.com', contact: '+919900000000', method: 'card', ...flag },
     });
     const result = await provider.submitRetry(mandateCase(), action('retry'));
     expect(result.status).toBe('submitted');
@@ -143,14 +131,13 @@ describe('Razorpay Test Mode recurring retry', () => {
     expect(requests.filter((request) => request.url.endsWith('/v1/payments/create/recurring'))).toHaveLength(0);
   });
 
-  it('replays the existing charge when the same action identity is submitted twice', async () => {
+  it('replays the existing charge when the same retry is submitted twice', async () => {
     const { requests, provider } = razorpay();
     const first = await provider.submitRetry(mandateCase(), action('retry'));
     const second = await provider.submitRetry(mandateCase(), action('retry'));
     expect(second.idempotent).toBe(true);
     expect(second.providerReference).toBe(first.providerReference);
     expect(requests.filter((request) => request.url.endsWith('/v1/payments/create/recurring'))).toHaveLength(1);
-    expect(requests.filter((request) => request.method === 'POST' && request.url.endsWith('/v1/orders'))).toHaveLength(1);
   });
 
   it('charges again when the only payment on the order is a declined one', async () => {
@@ -160,8 +147,6 @@ describe('Razorpay Test Mode recurring retry', () => {
     expect(second.idempotent).toBeUndefined();
     expect(second.status).toBe('submitted');
     expect(requests.filter((request) => request.url.endsWith('/v1/payments/create/recurring'))).toHaveLength(2);
-    // The order is reused rather than duplicated, so the identity still owns one order.
-    expect(requests.filter((request) => request.method === 'POST' && request.url.endsWith('/v1/orders'))).toHaveLength(1);
   });
 
   it('charges the latest failed mandate attempt rather than the oldest one on record', async () => {
@@ -173,7 +158,7 @@ describe('Razorpay Test Mode recurring retry', () => {
   });
 
   it('refuses to charge when the original payment carries no authorized mandate token', async () => {
-    const { requests, provider } = razorpay({ payment: { id: 'pay_original', recurring: false, method: 'card', email: 'renewal@example.com', contact: '+919900000000' } });
+    const { requests, provider } = razorpay({ payment: { id: 'pay_original', order_id: 'order_original', recurring: false, method: 'card', email: 'renewal@example.com', contact: '+919900000000' } });
     const result = await provider.submitRetry(mandateCase(), action('retry'));
     expect(result.status).toBe('failed');
     expect(result.message).toMatch(/mandate/i);
@@ -204,13 +189,23 @@ describe('Razorpay Test Mode recurring retry', () => {
     expect(result.message).toContain('socket hang up');
   });
 
-  it('keeps the provider reference within the 40-character identity Razorpay accepts', async () => {
+  it('refuses to charge when the original payment carries no order id to retry against', async () => {
+    const { requests, provider } = razorpay({ payment: { id: 'pay_original', recurring: true, token_id: 'token_1', customer_id: 'cust_1', email: 'renewal@example.com', contact: '+919900000000', method: 'card' } });
+    const result = await provider.submitRetry(mandateCase(), action('retry'));
+    expect(result.status).toBe('failed');
+    expect(result.message).toMatch(/order id/i);
+    expect(requests.some((request) => request.method === 'POST')).toBe(false);
+  });
+});
+
+describe('Razorpay Test Mode fallback link', () => {
+  it('keeps the reference_id within the 40-character identity Razorpay accepts', async () => {
     const { requests, provider } = razorpay();
-    const long = { ...action('retry'), idempotencyKey: `case-${'x'.repeat(60)}:retry` };
-    await provider.submitRetry(mandateCase(), long);
-    const order = requests.find((request) => request.method === 'POST' && request.url.endsWith('/v1/orders'));
-    expect(String(order?.body.receipt).length).toBeLessThanOrEqual(40);
-    expect(String(order?.body.receipt)).not.toBe(long.idempotencyKey);
+    const long = { ...action('fallback_link'), idempotencyKey: `case-${'x'.repeat(60)}:fallback_link` };
+    await provider.createFallbackLink(mandateCase(), long);
+    const link = requests.find((request) => request.method === 'POST' && request.url.endsWith('/v1/payment_links'));
+    expect(String(link?.body.reference_id).length).toBeLessThanOrEqual(40);
+    expect(String(link?.body.reference_id)).not.toBe(long.idempotencyKey);
   });
 });
 

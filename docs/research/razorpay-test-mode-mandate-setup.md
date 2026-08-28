@@ -227,7 +227,7 @@ For the adapter this matters: these surface at `src/provider.ts:292` as `status:
 
 Source: https://razorpay.com/docs/payments/recurring-payments/cards/faqs/
 
-**Flag against the implementation:** the adapter creates a **new** order per action identity (`src/provider.ts:301-310`) rather than re-initiating against the failed payment's own `order_id`. Razorpay's FAQ describes retrying "for the same order id". The docs do not forbid a new order, but the two are not the same operation, and the 36-hour spacing is not modelled anywhere in the adapter.
+**Flag against the implementation — resolved 2026-08-28:** the adapter used to create a **new** order per action identity rather than re-initiating against the failed payment's own `order_id`, which Razorpay's FAQ describes retrying "for the same order id". `submitRetry` now reads `order_id` directly off the original failed payment (`GET /v1/payments/:id`) and charges against that order; no order is ever created by a retry. Idempotency no longer depends on a receipt lookup — a live payment already sitting on that order (the original itself is `failed` and is filtered out by `LIVE_PAYMENT_STATUSES`) means an earlier call already collected it, so the retry replays that reference instead. The 36-hour spacing itself is still not modelled anywhere in the adapter; that remains open.
 
 ---
 
@@ -401,7 +401,7 @@ Two further verbatim warnings that the adapter already respects or should:
 - "If you have changed your webhook secret, remember to use the old secret for webhook signature validation while retrying older requests. Using the new secret will lead to a signature mismatch."
 - Idempotency: "Verify if an event with the same header is processed at your end", using `x-razorpay-event-id`. The HTTP boundary already dedupes on that header.
 
-**Flag against the implementation:** `src/provider.ts:388-390` falls back to `keySecret` when `webhookSecret` is unset. Razorpay's docs say the two "do not need" to be the same and never suggest the key secret as a webhook secret. The fallback will silently fail verification against any real webhook unless the operator happens to have typed the API key secret into the webhook form. Consider making a missing `RAZORPAY_WEBHOOK_SECRET` a hard configuration error instead.
+**Flag against the implementation — resolved:** the adapter used to fall back to `keySecret` when `webhookSecret` was unset. Razorpay's docs say the two "do not need" to be the same and never suggest the key secret as a webhook secret. `webhookSecret` is now a required field on `RazorpayTestModeOptions` — `loadConfig` throws `RAZORPAY_WEBHOOK_SECRET must be configured alongside the Razorpay API credentials` whenever Razorpay credentials are present, and the fallback is gone.
 
 Recurring-specific events to subscribe to (from https://razorpay.com/docs/payments/recurring-payments/subscribe-to-webhooks/): `payment.authorized`, `payment.captured`, `order.paid`, `payment.failed`, `invoice.paid`, `invoice.expired`, and `token.confirmed`.
 

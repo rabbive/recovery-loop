@@ -273,9 +273,11 @@ export class RazorpayTestModeProvider implements PaymentProvider {
 
   /**
    * Charges the mandate behind the failed renewal again: read the original payment, refuse unless it
-   * carries a recurring token, create or reuse an order keyed by the action identity, then charge.
-   * Reusing the identity resolves the existing charge instead of making a second one, so an
-   * infrastructure retry cannot collect the renewal twice.
+   * carries a recurring token, then charge against that **same** order — Razorpay's own retry
+   * semantics describe re-initiating "for the same order id", not creating a new one per attempt.
+   * A live payment already sitting on that order (necessarily a later, successful one: the original
+   * itself is `failed` and never counts) means an earlier call already collected the renewal, so
+   * this replays that reference instead of charging a second time.
    */
   async submitRetry(recoveryCase: RecoveryCase, action: RecoveryAction): Promise<ProviderResult> {
     // Guarded here as well as in eligibility. A caller that skipped the question would otherwise
@@ -291,16 +293,12 @@ export class RazorpayTestModeProvider implements PaymentProvider {
     if (!original.ok) return { status: 'failed', message: `Razorpay could not read the original payment ${attempt.providerPaymentId}: HTTP ${original.status}: ${this.describe(original)}` };
     const mandate = this.mandateOf(original.payload);
     if (mandate === undefined) return { status: 'failed', message: `Razorpay payment ${attempt.providerPaymentId} carries no authorized recurring mandate token, so it cannot be charged again` };
+    const orderId = typeof original.payload.order_id === 'string' ? original.payload.order_id : undefined;
+    if (orderId === undefined) return { status: 'failed', message: `Razorpay payment ${attempt.providerPaymentId} carries no order id, so no retry order is known to charge against` };
 
-    const receipt = this.reference(action.idempotencyKey);
-    const existingOrder = await this.findOrderByReceipt(receipt);
-    if (existingOrder !== undefined) {
-      const charged = await this.findPaymentOfOrder(existingOrder);
-      if (charged !== undefined) return { status: 'submitted', providerReference: charged, message: 'Razorpay already holds a recurring charge for this action identity', idempotent: true };
-    }
-    const order = existingOrder ?? await this.createOrder(recoveryCase, receipt, action.idempotencyKey);
-    if (typeof order !== 'string') return order;
-    return this.chargeMandate(recoveryCase, order, mandate);
+    const charged = await this.findPaymentOfOrder(orderId);
+    if (charged !== undefined) return { status: 'submitted', providerReference: charged, message: 'Razorpay already holds a recurring charge for this order', idempotent: true };
+    return this.chargeMandate(recoveryCase, orderId, mandate);
   }
 
   async createFallbackLink(recoveryCase: RecoveryCase, action: RecoveryAction): Promise<FallbackLinkResult> {
@@ -354,23 +352,6 @@ export class RazorpayTestModeProvider implements PaymentProvider {
     return typeof paymentId === 'string'
       ? { status: 'submitted', providerReference: paymentId, message: 'Razorpay Test Mode recurring charge submitted against the authorized mandate' }
       : { status: 'failed', message: 'Razorpay accepted the recurring charge without returning a payment id' };
-  }
-
-  /** Creates the order the recurring charge is collected against, or the failure that stopped it. */
-  private async createOrder(recoveryCase: RecoveryCase, receipt: string, recoveryActionKey: string): Promise<string | ProviderResult> {
-    const order = await this.call('POST', '/v1/orders', {
-      amount: recoveryCase.context.amount,
-      currency: recoveryCase.context.currency,
-      receipt,
-      notes: { caseId: recoveryCase.id, subscriptionId: recoveryCase.context.subscriptionId, recoveryActionKey },
-    });
-    if (!order.ok) return { status: 'failed', message: `Razorpay order creation returned HTTP ${order.status}: ${this.describe(order)}` };
-    return typeof order.payload.id === 'string' ? order.payload.id : { status: 'failed', message: 'Razorpay returned an order without an id' };
-  }
-
-  private async findOrderByReceipt(receipt: string): Promise<string | undefined> {
-    const response = await this.call('GET', '/v1/orders', undefined, { receipt });
-    return response.ok ? this.firstId(response.payload.items) : undefined;
   }
 
   /**

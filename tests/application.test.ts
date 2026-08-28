@@ -29,6 +29,26 @@ describe('application scaffold', () => {
     expect(loadConfig({ PORT: '3000', REQUIRE_DATABASE: 'true', DATABASE_URL: 'postgres://localhost/recovery_loop' }).requireDatabase).toBe(true);
   });
 
+  it('names each runtime component separately, so nothing reads as more or less live than it is', () => {
+    const summarize = (environment: NodeJS.ProcessEnv) => createRecoveryApplication({ config: loadConfig(environment), clock: new FixedClock('2026-01-01T00:00:00.000Z') }).runtimeSummary;
+
+    expect(summarize({ PORT: '3000' })).toEqual({
+      payments: 'Deterministic simulator',
+      liveDiagnosis: 'Deterministic fixture engine',
+      seededEvaluation: 'Simulator payments · deterministic fixture diagnosis',
+      persistence: 'In-memory (non-durable)',
+      recurringRetry: 'Disabled pending Test Mode proof',
+    });
+    expect(summarize({ PORT: '3000', PINCC_API_KEY: 'key', PINCC_MODEL: 'claude-sonnet-5' }).liveDiagnosis).toBe('Pincc · claude-sonnet-5');
+    expect(summarize({ PORT: '3000', PINCC_API_KEY: 'key', PINCC_MODEL: 'gpt-4o-mini' }).liveDiagnosis).toBe('Pincc · gpt-4o-mini');
+    expect(summarize({ PORT: '3000', ANTHROPIC_API_KEY: 'key', ANTHROPIC_MODEL: 'claude-sonnet-5' }).liveDiagnosis).toBe('Anthropic · claude-sonnet-5');
+    // The batch is fixtures whatever a live case uses, or its published figures would not reproduce.
+    expect(summarize({ PORT: '3000', PINCC_API_KEY: 'key', PINCC_MODEL: 'claude-sonnet-5' }).seededEvaluation).toBe('Simulator payments · deterministic fixture diagnosis');
+    expect(summarize({ PORT: '3000', RAZORPAY_KEY_ID: 'rzp_test_key', RAZORPAY_KEY_SECRET: 'secret', RAZORPAY_WEBHOOK_SECRET: 'hook' }).payments).toBe('Razorpay Test Mode');
+    expect(summarize({ PORT: '3000', RAZORPAY_KEY_ID: 'rzp_test_key', RAZORPAY_KEY_SECRET: 'secret', RAZORPAY_WEBHOOK_SECRET: 'hook', RAZORPAY_RECURRING_RETRY_ENABLED: 'true' }).recurringRetry).toBe('Enabled for Test Mode proof');
+    expect(summarize({ PORT: '3000', DATABASE_URL: 'postgres://localhost/recovery_loop' }).persistence).toBe('PostgreSQL');
+  });
+
   it('reports the store it actually composed rather than the one it was configured for', () => {
     const application = createRecoveryApplication({ config: loadConfig({ PORT: '3000' }), clock: new FixedClock('2026-01-01T00:00:00.000Z') });
 

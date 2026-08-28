@@ -21,7 +21,7 @@ function dashboard(): string {
 :root[data-theme="dark"]{color-scheme:dark;--background:#09090b;--surface:#111113;--surface-muted:#18181b;--foreground:#f4f4f5;--muted:#a1a1aa;--subtle:#71717a;--border:#27272a;--border-strong:#3f3f46;--primary:#f4f4f5;--primary-hover:#e4e4e7;--primary-foreground:#18181b;--primary-muted:#64748b;--ring:#71717a;--success:#f0fdf4;--success-bg:#166534;--warning:#facc15;--warning-bg:#422006;--danger:#fef2f2;--danger-bg:#991b1b;--info:#60a5fa;--info-bg:#172554}
 *{box-sizing:border-box}body{font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:var(--background);color:var(--foreground)}main{max-width:1440px;margin:auto;padding:40px 32px 72px}h1,h2,h3,h4,p{margin-top:0}h1{font-size:30px;letter-spacing:-.03em;line-height:1.2;margin-bottom:8px}h2{font-size:18px;letter-spacing:-.015em;margin:0}.muted{color:var(--muted)}.eyebrow{color:var(--subtle);font-size:11px;font-weight:700;letter-spacing:.09em;text-transform:uppercase}.lede{color:var(--muted);font-size:15px;margin:0}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .app-header{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;border-bottom:1px solid var(--border);padding-bottom:28px}.brand .eyebrow{margin-bottom:9px}.header-actions{display:flex;align-items:center;gap:12px;padding-top:18px}.environment{display:inline-flex;align-items:center;gap:7px;color:var(--muted);font-size:12px;white-space:nowrap}.dot{width:7px;height:7px;border-radius:999px;background:#22c55e;box-shadow:0 0 0 3px #dcfce7}
-.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;border:1px solid transparent;border-radius:7px;cursor:pointer;font:600 13px/1 Inter,ui-sans-serif,system-ui,sans-serif;padding:9px 13px;transition:background .15s,border-color .15s,box-shadow .15s}.btn:focus-visible,select:focus-visible,.theme-toggle:focus-visible{outline:2px solid var(--ring);outline-offset:2px}.btn-primary{background:var(--primary);color:var(--primary-foreground);box-shadow:0 1px 2px #0f172a1a}.btn-primary:hover{background:var(--primary-hover)}.btn-outline{background:var(--surface);border-color:var(--border-strong);color:var(--foreground)}.btn-outline:hover{background:var(--surface-muted)}.btn-danger{color:var(--danger);border-color:#fecaca}.btn-danger:hover{background:var(--danger-bg)}.button-meta{color:var(--primary-muted);font-size:11px;font-weight:500}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;border:1px solid transparent;border-radius:7px;cursor:pointer;font:600 13px/1 Inter,ui-sans-serif,system-ui,sans-serif;padding:9px 13px;transition:background .15s,border-color .15s,box-shadow .15s}.btn:focus-visible,select:focus-visible,.theme-toggle:focus-visible{outline:2px solid var(--ring);outline-offset:2px}.btn-primary{background:var(--primary);color:var(--primary-foreground);box-shadow:0 1px 2px #0f172a1a}.btn-primary:hover{background:var(--primary-hover)}.btn-outline{background:var(--surface);border-color:var(--border-strong);color:var(--foreground)}.btn-outline:hover{background:var(--surface-muted)}.btn-danger{color:var(--danger);border-color:#fecaca}.btn-danger:hover{background:var(--danger-bg)}.button-meta{color:var(--primary-muted);font-size:11px;font-weight:500}:root[data-theme="dark"] .btn-primary .button-meta{color:#334155}.runtime-facts{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:10px}.runtime-facts .fact-label{color:var(--muted);font-size:11px;letter-spacing:.04em;text-transform:uppercase}.runtime-facts span strong{font-size:12px}
 .theme-toggle{align-items:center;background:var(--surface);border:1px solid var(--border-strong);border-radius:7px;color:var(--foreground);cursor:pointer;display:inline-flex;font:600 12px/1 Inter,ui-sans-serif,system-ui,sans-serif;gap:7px;padding:9px 11px;transition:background .15s,border-color .15s}.theme-toggle:hover{background:var(--surface-muted)}.theme-icon{font-size:14px;line-height:1}.theme-label{min-width:30px;text-align:left}
 .toolbar{display:flex;align-items:center;justify-content:space-between;gap:20px;margin:22px 0 30px}.toolbar-copy{display:flex;flex-direction:column;gap:4px;min-width:0}.toolbar-copy .muted{font-size:12px;max-width:920px}.select-field{display:flex;align-items:center;gap:9px;color:var(--muted);font-size:12px;font-weight:600;white-space:nowrap}.select-field select{min-width:150px;border:1px solid var(--border-strong);border-radius:7px;background:var(--surface);color:var(--foreground);font:inherit;padding:8px 30px 8px 10px}
 .section{margin-top:32px}.section-heading{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:12px}.section-heading p{color:var(--muted);font-size:13px;margin:4px 0 0}.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}.metric-card{background:var(--surface);border:1px solid var(--border);border-radius:9px;min-height:106px;padding:16px 17px;box-shadow:0 1px 2px #0f172a08}.metric-card .label{color:var(--muted);font-size:12px;line-height:1.35;max-width:18ch}.metric-card .value{font-size:24px;font-weight:700;letter-spacing:-.035em;line-height:1.1;margin-top:12px}.metric-card .detail{color:var(--subtle);font-size:11px;margin-top:8px}.metric-card.primary{border-color:#cbd5e1;background:linear-gradient(180deg,#fff,#f8fafc)}
@@ -35,8 +35,8 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:11px 14p
 </style></head>
  <body><main data-shell>
 <header class="app-header"><div class="brand"><div class="eyebrow">Revenue operations</div><h1>Recovery Loop</h1><p class="lede">AI-assisted recovery for failed SaaS renewals.</p></div>
-<div class="header-actions"><span class="environment"><span class="dot"></span> Synthetic mode</span><button class="theme-toggle" id="theme-toggle" data-theme-toggle type="button" aria-pressed="false" aria-label="Switch to dark mode"><span class="theme-icon" aria-hidden="true">☾</span><span class="theme-label">Dark</span></button></div></header>
-<div class="toolbar"><div class="toolbar-copy"><span class="eyebrow">Workspace snapshot</span><span class="muted" id="batch">Loading live figures…</span></div><label class="select-field"><span>Status</span>
+<div class="header-actions"><span class="environment" id="runtime"><span class="dot"></span> Reading runtime…</span><button class="theme-toggle" id="theme-toggle" data-theme-toggle type="button" aria-pressed="false" aria-label="Switch to dark mode"><span class="theme-icon" aria-hidden="true">☾</span><span class="theme-label">Dark</span></button></div></header>
+<div class="toolbar"><div class="toolbar-copy"><span class="eyebrow">Workspace snapshot</span><span class="muted" id="batch">Loading live figures…</span><div class="runtime-facts" id="runtime-facts"></div></div><label class="select-field"><span>Status</span>
 <select id="filter"><option value="">All</option>${caseStatuses.map((status) => `<option value="${status}">${status}</option>`).join('')}</select></label>
  </div>
 <section class="section" aria-labelledby="metrics-heading"><div class="section-heading" data-section-heading><div><h2 id="metrics-heading">At a glance</h2><p>Live projection across every stored recovery case.</p></div></div><div class="metrics" data-card="metric-grid" id="cards"></div></section>
@@ -118,7 +118,15 @@ function renderEvaluation(batch){
     '</tbody></table></div>';
   panel.querySelectorAll('button.case-link').forEach(button=>{button.onclick=()=>openCase(button.dataset.id)});
 }
-async function refresh(){const [m,c,b]=await Promise.all([get('/api/metrics'),get(listUrl()),get('/api/evaluation')]);renderMetrics(m);renderCases(c);renderEvaluation(b)}
+// Naming each component separately: one "synthetic" badge could not say whether the payments, the
+// diagnosis, or the batch was the synthetic part, and a reader guessed wrong either way.
+function renderRuntime(r){
+  document.querySelector('#runtime').innerHTML='<span class="dot"></span> '+esc(r.payments)+' · '+esc(r.liveDiagnosis);
+  document.querySelector('#runtime-facts').innerHTML=
+    [['Payments',r.payments],['Live diagnosis',r.liveDiagnosis],['Seeded evaluation',r.seededEvaluation],['Persistence',r.persistence],['Recurring retry',r.recurringRetry]]
+      .map(([k,v])=>'<span><span class="fact-label">'+esc(k)+'</span> <strong>'+esc(v)+'</strong></span>').join('');
+}
+async function refresh(){const [m,c,b,r]=await Promise.all([get('/api/metrics'),get(listUrl()),get('/api/evaluation'),get('/api/runtime')]);renderMetrics(m);renderCases(c);renderEvaluation(b);renderRuntime(r)}
 document.querySelector('#filter').onchange=refresh;
 
 // Each scenario replays inside the server against a throwaway application. The browser never sees
@@ -234,7 +242,7 @@ export type CaseDetail = ReturnType<typeof caseDetail>;
  * orchestration runs, so an unsigned or unparseable delivery can never reach the workflow.
  */
 export function createRequestListener(application: RecoveryApplication): (request: IncomingMessage, response: ServerResponse) => void {
-  const { clock, config, evaluationRuns, expirySweeper, persistenceMode, provider, store, workflow } = application;
+  const { clock, config, evaluationRuns, expirySweeper, persistenceMode, provider, runtimeSummary, store, workflow } = application;
   const ingress = new WebhookIngress(provider, store, workflow, clock);
   const lab = new LabRunner();
 
@@ -359,6 +367,7 @@ export function createRequestListener(application: RecoveryApplication): (reques
       return send(response, 200, JSON.stringify({ ok: true, persistence: persistenceMode }));
     }
     if (request.method === 'GET' && url.pathname === '/') return send(response, 200, dashboard(), 'text/html');
+    if (request.method === 'GET' && url.pathname === '/api/runtime') return send(response, 200, JSON.stringify(runtimeSummary));
     if (request.method === 'GET' && url.pathname === '/api/metrics') return send(response, 200, JSON.stringify(await metrics()));
     if (request.method === 'GET' && url.pathname === '/api/cases') {
       const status = url.searchParams.get('status');

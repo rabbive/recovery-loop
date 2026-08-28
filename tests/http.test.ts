@@ -495,6 +495,27 @@ describe('dashboard demo path', () => {
     expect(() => new Function(script)).not.toThrow();
   });
 
+  it('names every runtime component rather than one badge that hides which part is synthetic', async () => {
+    const runtime = await fetch(`${origin}/api/runtime`).then((response) => response.json());
+    const html = await fetch(origin).then((response) => response.text());
+
+    expect(runtime).toMatchObject({ payments: 'Deterministic simulator', seededEvaluation: 'Simulator payments · deterministic fixture diagnosis' });
+    for (const fragment of ['/api/runtime', 'Payments', 'Live diagnosis', 'Seeded evaluation', 'Persistence', 'Recurring retry']) {
+      expect(html).toContain(fragment);
+    }
+    // The old badge said "Synthetic mode" even with live Pincc diagnosis configured.
+    expect(html).not.toContain('Synthetic mode');
+    expect(html).not.toContain('AI-powered');
+  });
+
+  it('reads dark-mode primary button metadata against the light button it sits on', async () => {
+    const html = await fetch(origin).then((response) => response.text());
+
+    // Dark mode inverts the primary button to a near-white background, so the muted slate the
+    // light theme uses for metadata sat at roughly 1.6:1 on it. #334155 on #f4f4f5 clears 4.5:1.
+    expect(html).toContain(':root[data-theme="dark"] .btn-primary .button-meta{color:#334155}');
+  });
+
   it('keeps the control plane out of the page a visitor is served', async () => {
     const html = await fetch(origin).then((response) => response.text());
 

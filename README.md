@@ -2,6 +2,24 @@
 
 AI-assisted recovery for failed SaaS renewal payments. The AI recommends; deterministic policy authorizes.
 
+**Live demo:** https://recovery-loop-ecd128e33dca.herokuapp.com/
+
+**Demo video:** Recording deferred; no video URL is published yet.
+
+## What is real, and what is simulated
+
+The dashboard header names each of these at runtime, so nothing on screen reads as more live than
+it is:
+
+| Component | Public demo |
+| --- | --- |
+| Payments | Deterministic simulator. Razorpay Test Mode when credentials are configured. |
+| Live diagnosis | Pincc when `PINCC_API_KEY` is set, otherwise the deterministic fixture engine. |
+| Seeded 60-case evaluation | Always simulator payments and fixture diagnosis, so its figures reproduce. |
+| Persistence | PostgreSQL when `DATABASE_URL` is attached; otherwise in-memory and non-durable. |
+| Razorpay recurring retry | Disabled. The charge has never run against the account — see below. |
+| Razorpay fallback link | Exercised for real against Test Mode. |
+
 ## MVP workflow
 
 ```text
@@ -24,15 +42,36 @@ npm run build
 npm run dev
 ```
 
-Open `http://localhost:3000` for the local dashboard. Click **Run 60-case evaluation** to populate the simulator-backed demo.
+Open `http://localhost:3000` for the local dashboard. A cold instance publishes the seeded batch on
+start, so the figures are there without pressing anything.
 
-Runtime configuration is documented in `.env.example`. Set `DATABASE_URL` to enable PostgreSQL persistence; without it, the app uses the in-memory adapter. The server initializes the schema from `src/persistence.sql`. Keep credentials outside the repository.
+Runtime configuration is documented in `.env.example`. Set `DATABASE_URL` to enable PostgreSQL
+persistence; without it the app uses the in-memory adapter, which loses every case on restart. A
+deployment sets `REQUIRE_DATABASE=true` so a missing database is a startup failure rather than a
+silent fall back. `GET /healthz` reports `{ ok, persistence }`. The server initializes the schema
+from `src/persistence.sql`. Keep credentials outside the repository.
 
-`tests/persistence.test.ts` is the only suite that exercises the PostgreSQL adapter — everything else runs against the in-memory one — so it is skipped unless `TEST_DATABASE_URL` points at a database it may truncate:
+`tests/persistence.test.ts` and `tests/postgres-concurrency.test.ts` are the only suites that
+exercise the PostgreSQL adapter — everything else runs against the in-memory one — so they are
+skipped unless `TEST_DATABASE_URL` points at a database they may truncate. A disposable one:
 
 ```bash
-TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5432/recovery_loop_test npm test
+docker run --name recovery-loop-postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=recovery_loop_test -p 5432:5432 -d postgres:16
+TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/recovery_loop_test npm run test:postgres
 ```
+
+On Heroku the durable store means `heroku-postgresql:essential-0`, which is a paid add-on. Nothing
+in this repository provisions it; attaching it is a deliberate human decision.
+
+### Who may change anything
+
+Every state-changing route — case registration, stop, escalate, manual expiry, and republishing the
+evaluation — requires `Authorization: Bearer $CONTROL_PLANE_TOKEN`. An instance with no token
+configured answers `404` for those routes rather than `401`, because advertising a locked door is
+still advertising. The token never reaches the browser, so the public page carries read-only
+projections and the replay lab and nothing else.
+
+The webhook is the one exception: it carries a provider HMAC of its own.
 
 ### Payment provider contract
 
@@ -56,7 +95,7 @@ Action identity is `RecoveryAction.idempotencyKey`. The simulator replays a reco
 
 1. In the Razorpay Dashboard, switch to **Test Mode** and generate API keys under *Account & Settings → API Keys*.
 2. Export them at runtime — never commit them: `RAZORPAY_KEY_ID=rzp_test_...`, `RAZORPAY_KEY_SECRET=...`.
-3. Add a webhook pointing at `POST /webhooks/razorpay` for `payment.failed`, `payment.captured`, `payment.authorized`, `subscription.cancelled`, and `dispute.created`. Razorpay signs webhooks with the **webhook secret**, which is separate from the API key secret: set it as `RAZORPAY_WEBHOOK_SECRET`. Without it the adapter falls back to `RAZORPAY_KEY_SECRET`.
+3. Add a webhook pointing at `POST /webhooks/razorpay` for `payment.failed`, `payment.captured`, `payment.authorized`, `subscription.cancelled`, and `dispute.created`. Razorpay signs webhooks with the **webhook secret**, which it issues separately from the API key secret: set it as `RAZORPAY_WEBHOOK_SECRET`. It is required whenever Razorpay credentials are present and is never substituted with the API secret — one leaked value must not both call the API and forge deliveries.
 4. Run the optional live checks: `RAZORPAY_KEY_ID=rzp_test_... RAZORPAY_KEY_SECRET=... npm test`. `tests/razorpay-integration.test.ts` is skipped unless a Test Mode key is present; it creates a real Test Mode payment link and proves the replay path.
 
 Charging a mandate end to end additionally requires a Test Mode customer with an authorized recurring token; without one the adapter reports the retry as unsupported rather than attempting it. The seeded evaluation never uses this adapter, so batch metrics stay reproducible.
@@ -67,7 +106,7 @@ These are deliberate, and named here rather than discovered later. `docs/researc
 
 - **A retry creates a new order rather than re-initiating the failed payment's own order.** The adapter keys a fresh order on the action identity, because that identity is what makes a re-driven action safe. Razorpay's own recurring FAQ instead describes re-initiating "for the same order id, repeatedly, every 36 hours, until the payment is successful". The two are not the same operation. Razorpay does not forbid a new order, but the difference is real and the **36-hour spacing is not modelled anywhere in the adapter** — the MVP's one-retry-per-case bound is what limits attempts instead.
 - **A missing `recurring` flag does not disqualify a payment.** `GET /v1/payments/:id` is not documented as returning `recurring` at all; it is documented on the token entity, and it is absent from Razorpay's own webhook payload samples, which do carry `token_id`. Treating absence as "not recurring" would refuse every real mandate payment and leave the retry path unreachable, so absence means unknown and `token_id` is what proves a mandate exists. A flag that is present is honoured as `true`, `'true'`, `'1'`, or `1`; only an explicit negative refuses the charge. See `mandateFlagAllows` in `src/provider.ts`.
-- **The mandate-charge path has never run against Razorpay.** Recurring payments are not enabled on the Test Mode account this was built with: `GET /v1/methods` reports `card` and `nach` but carries no `recurring` or `subscriptions` key, and both Standard Checkout and Razorpay's own hosted registration link refuse a correctly-created card-mandate order with "No appropriate payment method found". Enabling it requires a Razorpay support request. So `recurring: true` in the charge body matches Razorpay's documented type but is unverified live, and the fallback-link path is the only money operation this repo has exercised against the real API.
+- **The mandate-charge path has never run against Razorpay, and is disabled because of it.** `RAZORPAY_RECURRING_RETRY_ENABLED` defaults to `false`; while it is false, `retryEligibility` and `submitRetry` both refuse without a network call and policy steps the case down to the fallback link. `docs/research/razorpay-test-mode-mandate-setup.md` holds the ten-step Test Mode proof gate that would earn the flag, and `tests/razorpay-recurring-proof.test.ts` is the opt-in suite that proves it. Neither has been completed. Recurring payments are not enabled on the Test Mode account this was built with: `GET /v1/methods` reports `card` and `nach` but carries no `recurring` or `subscriptions` key, and both Standard Checkout and Razorpay's own hosted registration link refuse a correctly-created card-mandate order with "No appropriate payment method found". Enabling it requires a Razorpay support request. So `recurring: true` in the charge body matches Razorpay's documented type but is unverified live, and the fallback-link path is the only money operation this repo has exercised against the real API.
 
 Both implementations decide retry eligibility through one exported rule, `chargeableMandateAttempt`, so the seam cannot drift: a case with a succeeded attempt is already paid and offers nothing to charge, and the target is the latest failed mandate attempt rather than the oldest. The shared contract suite covers that case against both providers, and asserts neither of them charges a case it reports as ineligible. The two differ on purpose in one place: the simulator resolves a retry terminally (`succeeded`/`failed`) so the seeded batch stays reproducible, while the adapter can only report `submitted` and lets the webhook decide.
 
@@ -75,7 +114,7 @@ Retry eligibility comes from the provider, not from the recommendation. Policy m
 
 ### AI diagnosis
 
-Set `PINCC_API_KEY` and `PINCC_MODEL` to use Pincc's OpenAI-compatible gateway for live diagnosis. `PINCC_BASE_URL` defaults to `https://v2.pincc.ai`; the adapter sends Bearer authentication to `/v1/chat/completions` and forces the existing `record_diagnosis` function schema. If Pincc is not configured, `ANTHROPIC_API_KEY` keeps the direct Anthropic Messages adapter available (`ANTHROPIC_MODEL` defaults to `claude-sonnet-5`). Without either credential, the app uses the deterministic fixture engine. `DIAGNOSIS_TIMEOUT_MS` defaults to 15000.
+Set `PINCC_API_KEY` and `PINCC_MODEL` to use Pincc's gateway for live diagnosis. `PINCC_BASE_URL` defaults to `https://v2.pincc.ai`, and the route depends on the model id: a `claude-` model uses `${PINCC_BASE_URL}/v1/messages` with Anthropic's Messages contract, and any other model id uses `${PINCC_BASE_URL}/v1/chat/completions` with the OpenAI-compatible contract. Both force the `record_diagnosis` schema. Live diagnosis applies to cases the loop drives; the seeded batch always uses fixtures, so its figures reproduce. If Pincc is not configured, `ANTHROPIC_API_KEY` keeps the direct Anthropic Messages adapter available (`ANTHROPIC_MODEL` defaults to `claude-sonnet-5`). Without either credential, the app uses the deterministic fixture engine. `DIAGNOSIS_TIMEOUT_MS` defaults to 15000.
 
 When both Pincc and Anthropic credentials are configured, Pincc takes precedence. The seeded evaluation always uses fixtures, so gateway choice never changes the published batch metrics.
 
@@ -85,7 +124,9 @@ An escalated or exhausted case can still transition to `recovered` if the custom
 
 ### Webhooks
 
-`POST /webhooks/razorpay` accepts a signed JSON event. The handler verifies `x-razorpay-signature`, uses `x-razorpay-event-id` when the payload has no event id, deduplicates event delivery, and opens a case from renewal context on the first failed event. In local simulator mode, sign the raw body as `sim:<raw-body>`; with Razorpay credentials configured, use the HMAC-SHA256 signature generated with `RAZORPAY_WEBHOOK_SECRET` (falling back to `RAZORPAY_KEY_SECRET` when no webhook secret is configured).
+`POST /webhooks/razorpay` accepts a signed JSON event. The handler verifies `x-razorpay-signature` before parsing anything, uses `x-razorpay-event-id` when the payload has no event id, and deduplicates delivery. Both providers verify an HMAC-SHA256 hex digest of the raw body: Razorpay's uses `RAZORPAY_WEBHOOK_SECRET`, and the simulator's uses `SIMULATOR_WEBHOOK_SECRET`, which defaults to random bytes generated per process so no outside caller can sign a delivery an unconfigured instance would accept.
+
+A delivery cannot open a case. Renewal context is merchant data, so it is registered first through the authenticated `POST /api/recovery-cases` with `{ id, context }`; the delivery then names that case through an explicit `caseId` or Razorpay's `notes.caseId`. Registration is idempotent, and a different renewal under an id already in use is a `409`.
 
 ## Architecture
 
@@ -134,7 +175,7 @@ The ladder is one authorized recurring retry, then one expiring fallback link, t
 
 `workflow.drive(caseId)` carries a case to its next resting point — diagnose if it has no recommendation, ask policy, execute what policy authorized — and is what the webhook calls once an event is safely persisted. A case resting on a submitted retry or a live link is waiting on the outside world, so `drive` leaves it alone rather than asking policy for a rung it has already spent. Nothing sequences those three steps outside the workflow.
 
-Actions are identified by `idempotencyKey` and stay `pending` until their result is stored, so a process that dies between the provider call and the write re-drives the same identity and the provider replays rather than charging again. `expireLapsedFallbackLink` retires a link the customer never paid — nothing else closes a case resting in `fallback_link_available` — and is exposed as `POST /api/expire`. Operators can stop or escalate a live case through `POST /api/cases/:id/stop` and `/escalate`; against a case that already reached an outcome, both record `manual_action_ignored` rather than overwriting it.
+Actions are identified by `idempotencyKey` and stay `pending` until their result is stored, so a process that dies between the provider call and the write re-drives the same identity and the provider replays rather than charging again. `expireLapsedFallbackLink` retires a link the customer never paid — nothing else closes a case resting in `fallback_link_available`. A scheduler sweeps at boot and every 60 seconds while the server listens, taking at most 100 due cases per tick and skipping a tick that would overlap a running sweep. The authenticated `POST /api/expire` runs the same bounded sweep for operational verification; it is not the mechanism. Operators can stop or escalate a live case through `POST /api/cases/:id/stop` and `/escalate`; against a case that already reached an outcome, both record `manual_action_ignored` rather than overwriting it.
 
 ### Merchant dashboard and projections
 
@@ -145,11 +186,14 @@ The dashboard at `/` is served from the HTTP boundary and reads these projection
 | `GET /api/metrics` | The live projection over every stored case — revenue at risk (renewals still in play: a case that reached any terminal outcome no longer counts), recovered amount, recovery rate, escalated, exhausted — plus `batch`, the last published run's own reconciled figures and versions. A published batch reports *beside* the live figures, never instead of them: runs are durable, so a batch that shadowed the live projection would shadow it permanently. Every figure in this MVP is synthetic and labelled so. |
 | `GET /api/cases?status=` | The case list. An unknown status is a `400` rather than a silently empty list; the vocabulary comes from the aggregate's transition table. |
 | `GET /api/cases/:id` | One case in full: renewal context, diagnosis with its evidence and confidence, every policy decision and its reason, actions, attempts, events, the append-only audit timeline, and — as `fallbackMessage` — the customer message for a live fallback link, previewed as it would be sent. |
-| `GET /api/evaluation` | Replays the last published batch — ground-truth safe action and outcome beside what the loop actually did. Only `POST` publishes a new one. |
+| `GET /api/evaluation` | Replays the last published batch — ground-truth safe action and outcome beside what the loop actually did. Only an authenticated `POST` publishes a new one. |
+| `GET /api/runtime` | Which payments, diagnosis, persistence, and recurring-retry configuration this instance is actually running, in the words the dashboard header shows. |
+| `GET /healthz` | `{ ok, persistence }` after the store answers. A failure is a generic `503`; the driver's own error, which names the host and often the credentials, goes to the logs. |
+| `POST /api/lab/replay` | Replays one named webhook scenario inside a throwaway application — its own store, its own simulator secret, fixture diagnosis. Public, because it can reach nothing: no signature or raw body is returned, and no canonical figure moves. |
 
 The fallback message preview is a preview and nothing more: `deliverable` is always `false`, no email, SMS, WhatsApp, or voice provider is integrated, and no send happens anywhere in the MVP. It names the renewal, the unchanged amount and currency, and the provider's own link reference — never a synthesized URL, a provider payment id, or gateway failure telemetry. It offers nothing once any payment attempt has succeeded or the case has reached an outcome, which covers a renewal paid outside the loop: that case stands down to `stopped` without ever reaching `recovered`, and asking its customer to pay the link would collect the renewal twice. The link it previews is the one `fallbackLinkState` calls live — the same rule policy and the expiry sweep use — and a lapsed link is marked `expired` rather than previewed as usable.
 
-A published batch is stored through `EvaluationRunStore`, so a restart shows a merchant the same figures rather than quietly replacing them with a live projection. `Stop` and `Escalate` appear only on non-terminal cases, using the domain's own terminal-status set.
+A published batch is stored through `EvaluationRunStore`, so a restart shows a merchant the same figures rather than quietly replacing them with a live projection. The public page carries no operator controls at all: stopping, escalating, expiring, and republishing are control-plane calls, and putting a bearer token in browser JavaScript would simply publish it.
 
 ## Synthetic evaluation
 
@@ -173,10 +217,15 @@ The public demo runs on Heroku. `Procfile` names the web process; Heroku runs `n
 automatically because the package defines a build script. `engines.node` is pinned to `22.x` so a
 deploy cannot silently move to a Node major nothing here has been tested against.
 
-The instance runs without Razorpay credentials on purpose. Without them the app uses the
-deterministic simulator — which is what the published batch figures are built on, and what keeps the
-replay lab available, since the lab's signing endpoint exists only when the provider can sign
-(see `signEvent` in `src/provider.ts`). A credentialled instance serves no lab.
+The instance runs without Razorpay credentials on purpose: without them the app uses the
+deterministic simulator, which is what the published batch figures are built on. The replay lab
+builds its own isolated simulator, so it stays available on a credentialled instance too and can
+never aim a synthetic delivery at a real payment integration.
+
+A durable deployment attaches PostgreSQL and sets `REQUIRE_DATABASE=true`, so a missing database is
+a startup failure rather than an instance that keeps answering while losing every case on restart.
+On Heroku that means `heroku-postgresql:essential-0`, a paid add-on nothing here provisions.
+`CONTROL_PLANE_TOKEN` enables the state-changing routes; without it they do not exist.
 
 `PINCC_API_KEY` is optional and requires `PINCC_MODEL`; when set, live cases use Pincc. `ANTHROPIC_API_KEY`
 remains a fallback. The seeded batch always uses fixtures, so gateway credentials never change its metrics.

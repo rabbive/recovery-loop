@@ -6,10 +6,12 @@
 # rather than an empty dashboard.
 #
 # Razorpay credentials are deliberately absent. Without them the app runs the deterministic
-# simulator, which is what the batch metrics are built on, and it is also what keeps the replay lab
-# available — the lab's signing endpoint exists only when the provider is the simulator, so a
-# credentialled instance could never serve it. Set them only on an instance you do not intend to
-# demo the lab from.
+# simulator, which is what the batch metrics are built on. The replay lab runs against its own
+# isolated simulator either way, so it stays available on a credentialled instance too.
+#
+# This blueprint has no database, so REQUIRE_DATABASE stays false and the instance keeps its cases
+# in memory: Render is the non-durable alternative, useful for looking at the UI and nothing that
+# has to survive a restart. The durable deployment attaches Postgres and sets REQUIRE_DATABASE=true.
 services:
   - type: web
     name: recovery-loop
@@ -19,7 +21,7 @@ services:
     branch: main
     buildCommand: npm ci && npm run build
     startCommand: npm start
-    healthCheckPath: /
+    healthCheckPath: /healthz
     envVars:
       # The app requires Node 22 (see `engines` in package.json).
       - key: NODE_VERSION
@@ -34,3 +36,13 @@ services:
         value: https://v2.pincc.ai
       - key: DIAGNOSIS_TIMEOUT_MS
         value: "30000"
+      # No database on this plan, so the instance is explicitly allowed to run in memory.
+      - key: REQUIRE_DATABASE
+        value: "false"
+      # Set in the Render dashboard. Without it every state-changing route is disabled.
+      - key: CONTROL_PLANE_TOKEN
+        sync: false
+      # Set in the Render dashboard. Absent, the simulator invents a secret per process and no
+      # outside caller can sign a delivery it will accept.
+      - key: SIMULATOR_WEBHOOK_SECRET
+        sync: false

@@ -19,6 +19,22 @@ describe('application scaffold', () => {
     expect(config.razorpayWebhookSecret).toBe('hook');
   });
 
+  it('refuses to run in memory when the deployment says a database is required', () => {
+    // Falling back to memory storage on a deployment loses every case and audit record on restart
+    // while the instance keeps answering 200, so a missing database has to be a startup failure.
+    expect(() => loadConfig({ PORT: '3000', REQUIRE_DATABASE: 'true' })).toThrow(/REQUIRE_DATABASE=true requires DATABASE_URL/);
+    expect(() => loadConfig({ PORT: '3000', REQUIRE_DATABASE: 'yes' })).toThrow(/must be true or false/);
+    expect(loadConfig({ PORT: '3000', REQUIRE_DATABASE: 'false' }).requireDatabase).toBe(false);
+    expect(loadConfig({ PORT: '3000' }).requireDatabase).toBe(false);
+    expect(loadConfig({ PORT: '3000', REQUIRE_DATABASE: 'true', DATABASE_URL: 'postgres://localhost/recovery_loop' }).requireDatabase).toBe(true);
+  });
+
+  it('reports the store it actually composed rather than the one it was configured for', () => {
+    const application = createRecoveryApplication({ config: loadConfig({ PORT: '3000' }), clock: new FixedClock('2026-01-01T00:00:00.000Z') });
+
+    expect(application.persistenceMode).toBe('memory');
+  });
+
   it('refuses Razorpay credentials with no webhook secret of their own', () => {
     // Falling back to the API secret meant one leaked value could both call Razorpay and forge
     // deliveries, and a misconfigured instance verified signatures nobody had ever issued.

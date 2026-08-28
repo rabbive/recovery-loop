@@ -7,7 +7,7 @@ import { RazorpayTestModeProvider, FixedClock } from '../src/provider.js';
 import { InMemoryRecoveryStore } from '../src/recovery.js';
 import { labScenarios, type LabScenario, type LabReplayResult } from '../src/lab.js';
 
-const config = { port: 0, controlPlaneToken: 'lab-control-token', simulatorWebhookSecret: 'lab-simulator-secret', razorpayRecurringRetryEnabled: false };
+const config = { port: 0, controlPlaneToken: 'lab-control-token', simulatorWebhookSecret: 'lab-simulator-secret', razorpayRecurringRetryEnabled: false, requireDatabase: false };
 const NOW = '2026-01-01T00:00:00.000Z';
 
 async function boot(provider?: ConstructorParameters<typeof RazorpayTestModeProvider>[0]): Promise<{ server: Server; origin: string }> {

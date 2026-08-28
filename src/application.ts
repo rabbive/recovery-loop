@@ -16,6 +16,8 @@ export interface RecoveryApplication {
   readonly workflow: RecoveryWorkflow;
   readonly evaluationRuns: EvaluationRunStore;
   readonly expirySweeper: ExpirySweeper;
+  /** Which store this instance actually composed, so `/healthz` reports what is true rather than configured. */
+  readonly persistenceMode: 'postgresql' | 'memory';
   readonly postgresStore?: PostgresRecoveryStore;
 }
 
@@ -68,5 +70,5 @@ export function createRecoveryApplication(options: RecoveryApplicationOptions): 
   const workflow = new RecoveryWorkflow(store, provider, diagnosisEngine, new DeterministicPolicy(), clock);
   // Published batch figures live wherever the cases live, so a restart shows the same numbers.
   const evaluationRuns = options.evaluationRuns ?? postgresStore?.evaluationRuns ?? new InMemoryEvaluationRunStore();
-  return { config: options.config, clock, store, provider, diagnosisEngine, workflow, evaluationRuns, expirySweeper: new ExpirySweeper(store, workflow, clock), ...(postgresStore === undefined ? {} : { postgresStore }) };
+  return { config: options.config, clock, store, provider, diagnosisEngine, workflow, evaluationRuns, expirySweeper: new ExpirySweeper(store, workflow, clock), persistenceMode: postgresStore === undefined ? 'memory' : 'postgresql', ...(postgresStore === undefined ? {} : { postgresStore }) };
 }

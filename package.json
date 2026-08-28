@@ -11,7 +11,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test:postgres": "vitest run tests/persistence.test.ts tests/postgres-concurrency.test.ts"
   },
   "engines": {
     "node": "22.x"

@@ -1,6 +1,8 @@
 export interface RuntimeConfig {
   readonly port: number;
   readonly databaseUrl?: string;
+  /** Whether the instance must refuse to start rather than fall back to memory storage. */
+  readonly requireDatabase: boolean;
   readonly razorpayKeyId?: string;
   readonly razorpayKeySecret?: string;
   readonly razorpayWebhookSecret?: string;
@@ -23,6 +25,15 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Runtim
   const port = Number(rawPort);
   if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error(`PORT must be an integer between 1 and 65535: ${rawPort}`);
   const databaseUrl = environment.DATABASE_URL?.trim() || undefined;
+  // Memory storage is the right default for a local run and the wrong one for a deployment: an
+  // instance that silently loses every case and audit record on restart looks healthy while doing
+  // it. A public deployment sets this, and then a missing database is a startup failure.
+  const rawRequireDatabase = environment.REQUIRE_DATABASE?.trim() || undefined;
+  if (rawRequireDatabase !== undefined && rawRequireDatabase !== 'true' && rawRequireDatabase !== 'false') {
+    throw new Error(`REQUIRE_DATABASE must be true or false: ${rawRequireDatabase}`);
+  }
+  const requireDatabase = rawRequireDatabase === 'true';
+  if (requireDatabase && databaseUrl === undefined) throw new Error('REQUIRE_DATABASE=true requires DATABASE_URL');
   const razorpayKeyId = environment.RAZORPAY_KEY_ID?.trim() || undefined;
   const razorpayKeySecret = environment.RAZORPAY_KEY_SECRET?.trim() || undefined;
   if ((razorpayKeyId === undefined) !== (razorpayKeySecret === undefined)) throw new Error('RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET must be configured together');
@@ -63,6 +74,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Runtim
   return {
     port,
     ...(databaseUrl === undefined ? {} : { databaseUrl }),
+    requireDatabase,
     ...(razorpayKeyId === undefined ? {} : { razorpayKeyId }),
     ...(razorpayKeySecret === undefined ? {} : { razorpayKeySecret }),
     ...(razorpayWebhookSecret === undefined ? {} : { razorpayWebhookSecret }),

@@ -9,7 +9,7 @@ import { InMemoryRecoveryStore } from '../src/recovery.js';
 
 const SIMULATOR_SECRET = 'test-simulator-secret';
 const CONTROL_TOKEN = 'test-control-token';
-const config = { port: 0, logLevel: 'info' as const, simulatorWebhookSecret: SIMULATOR_SECRET, controlPlaneToken: CONTROL_TOKEN, razorpayRecurringRetryEnabled: false };
+const config = { port: 0, logLevel: 'info' as const, simulatorWebhookSecret: SIMULATOR_SECRET, controlPlaneToken: CONTROL_TOKEN, razorpayRecurringRetryEnabled: false, requireDatabase: false };
 const context = { customerId: 'customer-1', subscriptionId: 'subscription-1', orderId: 'order-1', amount: 1200, currency: 'INR', dueAt: '2026-01-01T00:00:00.000Z' };
 
 let server: Server;
@@ -213,6 +213,31 @@ describe('webhook boundary', () => {
     await control('/api/cases/case-1/escalate');
 
     expect(await fetch(`${origin}/api/metrics`).then((response) => response.json())).toMatchObject({ revenueAtRisk: 0, escalated: 1 });
+  });
+
+  it('reports readiness and the storage it is actually using', async () => {
+    const response = await fetch(`${origin}/healthz`);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, persistence: 'memory' });
+  });
+
+  it('fails readiness without naming the database it could not reach', async () => {
+    const failing = { ...store, healthCheck: async () => { throw new Error('connect ECONNREFUSED postgres://user:pw@db.internal:5432'); } } as unknown as InMemoryRecoveryStore;
+    const application = createRecoveryApplication({ config, clock: new FixedClock('2026-01-01T00:00:00.000Z'), store: failing });
+    const unhealthy = createServer(createRequestListener(application));
+    await new Promise<void>((resolve) => unhealthy.listen(0, '127.0.0.1', resolve));
+    const unhealthyOrigin = `http://127.0.0.1:${(unhealthy.address() as AddressInfo).port}`;
+
+    const response = await fetch(`${unhealthyOrigin}/healthz`);
+    const body = await response.text();
+
+    expect(response.status).toBe(503);
+    expect(JSON.parse(body)).toMatchObject({ ok: false });
+    // A driver error names the host, the database, and often the credentials it failed with.
+    expect(body).not.toContain('postgres://');
+    expect(body).not.toContain('ECONNREFUSED');
+    await new Promise<void>((resolve, reject) => unhealthy.close((error) => (error ? reject(error) : resolve())));
   });
 
   it('answers an unknown route with 404', async () => {

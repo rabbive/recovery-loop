@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
-import { createRecoveryServer, publishSeededBatchIfMissing } from '../src/server.js';
+import { createServer } from 'node:http';
+import { describe, expect, it, vi } from 'vitest';
+import { bootstrap, createRecoveryServer, publishSeededBatchIfMissing } from '../src/server.js';
 import { createRecoveryApplication } from '../src/application.js';
 import { InMemoryRecoveryStore } from '../src/recovery.js';
 import { FixedClock } from '../src/provider.js';
@@ -28,7 +29,7 @@ describe('server composition', () => {
 
 describe('publishing the seeded batch on start', () => {
   function application() {
-    return createRecoveryApplication({ config: { port: 0, razorpayRecurringRetryEnabled: false }, clock: new FixedClock('2026-01-01T00:00:00.000Z'), store: new InMemoryRecoveryStore() });
+    return createRecoveryApplication({ config: { port: 0, razorpayRecurringRetryEnabled: false, requireDatabase: false }, clock: new FixedClock('2026-01-01T00:00:00.000Z'), store: new InMemoryRecoveryStore() });
   }
 
   it('publishes figures so a cold instance does not greet its visitor with zeroes', async () => {
@@ -59,5 +60,18 @@ describe('publishing the seeded batch on start', () => {
 
     // A dashboard without figures is bad; an instance that refuses to start is worse.
     await expect(publishSeededBatchIfMissing(failing)).resolves.toBeUndefined();
+  });
+
+  it('never starts listening when a required database cannot be initialized', async () => {
+    // A deployment that answers 200 while quietly holding its cases in memory is worse than one
+    // that refuses to boot: the figures look real right up until the dyno restarts.
+    const application = createRecoveryApplication({ config: { port: 0, razorpayRecurringRetryEnabled: false, requireDatabase: true, databaseUrl: 'postgres://unreachable/recovery_loop' }, clock: new FixedClock('2026-01-01T00:00:00.000Z'), store: new InMemoryRecoveryStore() });
+    const server = createServer(() => undefined);
+    const listen = vi.spyOn(server, 'listen');
+    const failing = { ...application, postgresStore: { initialize: async () => { throw new Error('database is unreachable'); } } } as unknown as typeof application;
+
+    await expect(bootstrap({ application: failing, server })).rejects.toThrow(/unreachable/);
+
+    expect(listen).not.toHaveBeenCalled();
   });
 });

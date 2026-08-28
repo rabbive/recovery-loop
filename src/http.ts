@@ -234,7 +234,7 @@ export type CaseDetail = ReturnType<typeof caseDetail>;
  * orchestration runs, so an unsigned or unparseable delivery can never reach the workflow.
  */
 export function createRequestListener(application: RecoveryApplication): (request: IncomingMessage, response: ServerResponse) => void {
-  const { clock, config, evaluationRuns, expirySweeper, provider, store, workflow } = application;
+  const { clock, config, evaluationRuns, expirySweeper, persistenceMode, provider, store, workflow } = application;
   const ingress = new WebhookIngress(provider, store, workflow, clock);
   const lab = new LabRunner();
 
@@ -346,6 +346,17 @@ export function createRequestListener(application: RecoveryApplication): (reques
       // The same bounded sweep the scheduler runs. This route exists for operational verification;
       // it is not what keeps lapsed links from accumulating.
       return send(response, 200, JSON.stringify(await expirySweeper.sweep()));
+    }
+    if (request.method === 'GET' && url.pathname === '/healthz') {
+      try {
+        await store.healthCheck();
+      } catch (error) {
+        // The reason belongs in the logs, not in a public body: a driver error names the host,
+        // the database, and often the user it failed to authenticate.
+        console.error('Recovery Loop readiness check failed', error);
+        return send(response, 503, JSON.stringify({ ok: false, persistence: persistenceMode }));
+      }
+      return send(response, 200, JSON.stringify({ ok: true, persistence: persistenceMode }));
     }
     if (request.method === 'GET' && url.pathname === '/') return send(response, 200, dashboard(), 'text/html');
     if (request.method === 'GET' && url.pathname === '/api/metrics') return send(response, 200, JSON.stringify(await metrics()));

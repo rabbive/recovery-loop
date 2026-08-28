@@ -360,7 +360,7 @@ describe('dashboard demo path', () => {
     expect(authorized.actions.map((action) => action.kind)).toEqual(['retry']);
 
     // The provider settles the authorized retry: this is the demo's "advance a simulated result".
-    await post({ id: 'event-2', type: 'payment.captured', caseId: 'case-1', occurredAt: '2026-01-01T00:05:00.000Z' });
+    await post({ id: 'event-2', type: 'payment.captured', caseId: 'case-1', providerPaymentId: 'sim_retry_case-1', occurredAt: '2026-01-01T00:05:00.000Z' });
 
     const recovered = await fetch(`${origin}/api/cases/case-1`).then((response) => response.json()) as CaseDetail;
     expect(recovered.status).toBe('recovered');
@@ -368,6 +368,29 @@ describe('dashboard demo path', () => {
     expect(recovered.audit.some((entry) => entry.actor === 'provider')).toBe(true);
     expect(await fetch(`${origin}/api/metrics`).then((response) => response.json())).toMatchObject({ recoveredAmount: 1200, recoveryRate: 1, revenueAtRisk: 0 });
     expect(await fetch(`${origin}/api/cases?status=recovered`).then((response) => response.json())).toMatchObject([{ id: 'case-1', recoveredAmount: 1200 }]);
+  });
+
+  it('credits a link a customer paid, reading the action identity out of Razorpay\'s own body', async () => {
+    // Razorpay reports a paid link as a payment under its own id, naming the link in a sibling
+    // entity. Without reading that, the money looks like a payment nothing on the case can claim.
+    await post(failedRenewal());
+    const authorized = await store.get('case-1');
+    expect(authorized?.actions.find((candidate) => candidate.kind === 'retry')?.providerReference).toBe('sim_retry_case-1');
+
+    await post({
+      id: 'event-2',
+      type: 'payment.captured',
+      caseId: 'case-1',
+      occurredAt: '2026-01-01T00:05:00.000Z',
+      payload: {
+        payment: { entity: { id: 'pay_customer_paid', notes: { recoveryActionKey: 'case-1:retry' } } },
+        payment_link: { entity: { id: 'plink_demo', notes: { caseId: 'case-1' } } },
+      },
+    });
+
+    const recovered = await fetch(`${origin}/api/cases/case-1`).then((response) => response.json()) as CaseDetail;
+    expect(recovered.status).toBe('recovered');
+    expect(recovered.recoveredAmount).toBe(1200);
   });
 
   it('serves a dashboard whose script parses, so a syntax slip cannot ship as a blank page', async () => {

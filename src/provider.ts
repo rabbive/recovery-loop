@@ -21,6 +21,10 @@ export interface NormalizedEventInput {
   readonly type: ProviderEvent['type'];
   readonly caseId: string;
   readonly providerPaymentId?: string;
+  /** The provider object a recovery action created, when the delivery names one. */
+  readonly providerActionReference?: string;
+  /** The action identity the adapter wrote into the provider's notes. */
+  readonly actionIdempotencyKey?: string;
   readonly occurredAt: string;
   readonly payload?: Readonly<Record<string, unknown>>;
 }
@@ -127,6 +131,8 @@ export class DeterministicSimulator implements PaymentProvider {
       type: input.type,
       caseId: input.caseId,
       ...(input.providerPaymentId === undefined ? {} : { providerPaymentId: input.providerPaymentId }),
+      ...(input.providerActionReference === undefined ? {} : { providerActionReference: input.providerActionReference }),
+      ...(input.actionIdempotencyKey === undefined ? {} : { actionIdempotencyKey: input.actionIdempotencyKey }),
       occurredAt: input.occurredAt,
       receivedAt,
       payload,
@@ -234,6 +240,8 @@ export class RazorpayTestModeProvider implements PaymentProvider {
       type: input.type,
       caseId: input.caseId,
       ...(input.providerPaymentId === undefined ? {} : { providerPaymentId: input.providerPaymentId }),
+      ...(input.providerActionReference === undefined ? {} : { providerActionReference: input.providerActionReference }),
+      ...(input.actionIdempotencyKey === undefined ? {} : { actionIdempotencyKey: input.actionIdempotencyKey }),
       occurredAt: input.occurredAt,
       receivedAt,
       payload: input.payload ?? {},
@@ -270,7 +278,7 @@ export class RazorpayTestModeProvider implements PaymentProvider {
       const charged = await this.findPaymentOfOrder(existingOrder);
       if (charged !== undefined) return { status: 'submitted', providerReference: charged, message: 'Razorpay already holds a recurring charge for this action identity', idempotent: true };
     }
-    const order = existingOrder ?? await this.createOrder(recoveryCase, receipt);
+    const order = existingOrder ?? await this.createOrder(recoveryCase, receipt, action.idempotencyKey);
     if (typeof order !== 'string') return order;
     return this.chargeMandate(recoveryCase, order, mandate);
   }
@@ -289,7 +297,7 @@ export class RazorpayTestModeProvider implements PaymentProvider {
       reference_id: reference,
       expire_by: expiresAtSeconds,
       description: `Renewal recovery for order ${recoveryCase.context.orderId}`,
-      notes: { caseId: recoveryCase.id, subscriptionId: recoveryCase.context.subscriptionId },
+      notes: { caseId: recoveryCase.id, subscriptionId: recoveryCase.context.subscriptionId, recoveryActionKey: action.idempotencyKey },
     });
     if (created.ok) {
       // A created link without an id means the response is not what the API documents.
@@ -329,12 +337,12 @@ export class RazorpayTestModeProvider implements PaymentProvider {
   }
 
   /** Creates the order the recurring charge is collected against, or the failure that stopped it. */
-  private async createOrder(recoveryCase: RecoveryCase, receipt: string): Promise<string | ProviderResult> {
+  private async createOrder(recoveryCase: RecoveryCase, receipt: string, recoveryActionKey: string): Promise<string | ProviderResult> {
     const order = await this.call('POST', '/v1/orders', {
       amount: recoveryCase.context.amount,
       currency: recoveryCase.context.currency,
       receipt,
-      notes: { caseId: recoveryCase.id, subscriptionId: recoveryCase.context.subscriptionId },
+      notes: { caseId: recoveryCase.id, subscriptionId: recoveryCase.context.subscriptionId, recoveryActionKey },
     });
     if (!order.ok) return { status: 'failed', message: `Razorpay order creation returned HTTP ${order.status}: ${this.describe(order)}` };
     return typeof order.payload.id === 'string' ? order.payload.id : { status: 'failed', message: 'Razorpay returned an order without an id' };

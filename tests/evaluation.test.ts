@@ -91,12 +91,11 @@ describe('evaluation run', () => {
     expect(metrics.recoveredCases).toBe(results.filter((result) => result.recoveredAmount > 0).length);
     expect(metrics.retryRecoveredCases).toBe(results.filter((result) => result.recoveryPath === 'retry').length);
     expect(metrics.fallbackRecoveredCases).toBe(results.filter((result) => result.recoveryPath === 'fallback_link').length);
-    expect(metrics.unattributedRecoveredCases).toBe(results.filter((result) => result.outcome === 'recovered_unattributed').length);
     expect(metrics.escalatedCases).toBe(results.filter((result) => result.outcome === 'escalated').length);
     expect(metrics.exhaustedCases).toBe(results.filter((result) => result.outcome === 'exhausted').length);
     expect(metrics.stoppedCases).toBe(results.filter((result) => result.outcome === 'stopped').length);
     // Every recovered case is accounted for by exactly one attribution bucket.
-    expect(metrics.recoveredCases).toBe(metrics.retryRecoveredCases + metrics.fallbackRecoveredCases + metrics.unattributedRecoveredCases);
+    expect(metrics.recoveredCases).toBe(metrics.retryRecoveredCases + metrics.fallbackRecoveredCases);
     expect(metrics.recoveryRate).toBeCloseTo(metrics.recoveredCases / metrics.totalCases, 12);
   });
 
@@ -127,8 +126,11 @@ describe('evaluation run', () => {
       expect(result.recoveredAmount > 0).toBe(result.expected.recoversRevenue);
       if (result.recoveredAmount === 0) continue;
       expect(result.recoveredAmount).toBe(result.amountAtRisk);
-      // Something policy authorized preceded the success, even when no surviving action can be credited.
-      expect(result.recoveryCase.actions.length).toBeGreaterThan(0);
+      // The figure names the action that earned it, and the path agrees with what was persisted.
+      expect(result.recoveryCase.recoveryAttribution).toBeDefined();
+      expect(result.recoveryPath).toBe(result.recoveryCase.recoveryAttribution?.actionKind);
+      const credited = result.recoveryCase.actions.find((action) => action.idempotencyKey === result.recoveryCase.recoveryAttribution?.idempotencyKey);
+      expect(credited?.providerReference).toBe(result.recoveryCase.recoveryAttribution?.providerReference);
     }
     const preExisting = results.filter((result) => result.outcome === 'stopped');
     expect(preExisting.length).toBeGreaterThan(0);
@@ -139,15 +141,17 @@ describe('evaluation run', () => {
     }
   });
 
-  it('leaves a recovery no surviving action can be credited with unattributed', async () => {
-    const { metrics, results } = await runSeededBatch();
-    const unattributed = results.filter((result) => result.outcome === 'recovered_unattributed');
-    expect(metrics.unattributedRecoveredCases).toBe(unattributed.length);
-    expect(unattributed.length).toBeGreaterThan(0);
-    for (const result of unattributed) {
+  it('credits a link the customer paid after it lapsed to that link', async () => {
+    const { results } = await runSeededBatch();
+    const late = results.filter((result) => result.archetype === 'late_success_after_exhaustion_recovered');
+    expect(late.length).toBeGreaterThan(0);
+    for (const result of late) {
+      // The link expired and the case was exhausted before the money arrived. The action is gone,
+      // but the payment still names it, so the renewal is recovered revenue with an owner.
+      expect(result.recoveryCase.audit.some((event) => event.type === 'fallback_link_expired')).toBe(true);
+      expect(result.recoveryPath).toBe('fallback_link');
       expect(result.recoveredAmount).toBe(result.amountAtRisk);
-      expect(result.recoveryPath).toBe('none');
-      expect(result.recoveryCase.actions.every((action) => action.status === 'failed')).toBe(true);
+      expect(result.recoveryCase.recoveryAttribution?.providerReference).toBe(`sim_link_${result.caseId}`);
     }
   });
 
@@ -283,8 +287,7 @@ describe('evaluation run', () => {
       unrecoveredAmount: 168_202_800,
       recoveredCases: 28,
       retryRecoveredCases: 15,
-      fallbackRecoveredCases: 9,
-      unattributedRecoveredCases: 4,
+      fallbackRecoveredCases: 13,
       escalatedCases: 16,
       exhaustedCases: 12,
       stoppedCases: 4,
@@ -308,9 +311,12 @@ describe('evaluation run', () => {
     const late = await runEvaluation(cases, { startedAt: '2027-06-30T12:00:00.000Z' });
     expect(late.metrics).toEqual({ ...early.metrics, startedAt: late.metrics.startedAt });
     expect(early.metrics.startedAt).toBe('2026-01-01T00:00:00.000Z');
+    // A link only lapses because the clock moved past its expiry, so every expiry proves the
+    // controllable clock ran. Where nobody paid afterwards, the case must end exhausted.
     const lapsed = early.results.filter((result) => result.recoveryCase.audit.some((event) => event.type === 'fallback_link_expired'));
     expect(lapsed.length).toBeGreaterThan(0);
-    for (const result of lapsed) expect(result.outcome).toBe('exhausted');
+    for (const result of lapsed.filter((result) => result.recoveredAmount === 0)) expect(result.outcome).toBe('exhausted');
+    expect(lapsed.filter((result) => result.recoveredAmount === 0).length).toBeGreaterThan(0);
   });
 
   it('rejects an unusable start timestamp instead of running on a broken clock', async () => {

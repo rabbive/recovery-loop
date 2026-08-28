@@ -76,7 +76,7 @@ describe('recovery orchestration', () => {
     await openFailedCase(workflow, provider);
 
     await advance(workflow, true);
-    const recovered = await workflow.ingestEvent(provider.normalizeEvent({ id: 'event-2', type: 'payment_succeeded', caseId: 'case-1', occurredAt: '2026-01-01T00:00:05.000Z' }, '2026-01-01T00:00:06.000Z'));
+    const recovered = await workflow.ingestEvent(provider.normalizeEvent({ id: 'event-2', type: 'payment_succeeded', caseId: 'case-1', providerPaymentId: 'sim_retry_case-1', occurredAt: '2026-01-01T00:00:05.000Z' }, '2026-01-01T00:00:06.000Z'));
 
     expect(recovered.status).toBe('recovered');
     expect(provider.calls.map((call) => call.kind)).toEqual(['retry']);
@@ -167,7 +167,7 @@ describe('recovery orchestration', () => {
     clock.advance(24 * 60 * 60 * 1000);
     await workflow.expireLapsedFallbackLink('case-1');
 
-    const recovered = await workflow.ingestEvent(provider.normalizeEvent({ id: 'event-9', type: 'payment_succeeded', caseId: 'case-1', occurredAt: '2026-01-02T00:00:01.000Z' }, '2026-01-02T00:00:02.000Z'));
+    const recovered = await workflow.ingestEvent(provider.normalizeEvent({ id: 'event-9', type: 'payment_succeeded', caseId: 'case-1', providerPaymentId: 'pay_link_case-1', providerActionReference: 'sim_link_case-1', occurredAt: '2026-01-02T00:00:01.000Z' }, '2026-01-02T00:00:02.000Z'));
 
     expect(recovered.status).toBe('recovered');
     expect(recovered.recoveredAmount).toBe(1200);
@@ -192,7 +192,7 @@ describe('recovery orchestration', () => {
     const { workflow, provider } = setup();
     await openFailedCase(workflow, provider);
     await advance(workflow, true);
-    await workflow.ingestEvent(provider.normalizeEvent({ id: 'event-2', type: 'payment_succeeded', caseId: 'case-1', occurredAt: '2026-01-01T00:00:05.000Z' }, '2026-01-01T00:00:06.000Z'));
+    await workflow.ingestEvent(provider.normalizeEvent({ id: 'event-2', type: 'payment_succeeded', caseId: 'case-1', providerPaymentId: 'sim_retry_case-1', occurredAt: '2026-01-01T00:00:05.000Z' }, '2026-01-01T00:00:06.000Z'));
 
     const stopped = await workflow.stop('case-1');
 
@@ -204,7 +204,7 @@ describe('recovery orchestration', () => {
     const { workflow, provider } = setup();
     await openFailedCase(workflow, provider);
     await advance(workflow, true);
-    await workflow.ingestEvent(provider.normalizeEvent({ id: 'event-2', type: 'payment_succeeded', caseId: 'case-1', occurredAt: '2026-01-01T00:00:05.000Z' }, '2026-01-01T00:00:06.000Z'));
+    await workflow.ingestEvent(provider.normalizeEvent({ id: 'event-2', type: 'payment_succeeded', caseId: 'case-1', providerPaymentId: 'sim_retry_case-1', occurredAt: '2026-01-01T00:00:05.000Z' }, '2026-01-01T00:00:06.000Z'));
 
     const escalated = await workflow.escalate('case-1');
 
@@ -216,7 +216,7 @@ describe('recovery orchestration', () => {
     const { workflow, provider } = setup();
     await openFailedCase(workflow, provider);
     await advance(workflow, true);
-    const recovered = await workflow.ingestEvent(provider.normalizeEvent({ id: 'event-2', type: 'payment_succeeded', caseId: 'case-1', occurredAt: '2026-01-01T00:00:05.000Z' }, '2026-01-01T00:00:06.000Z'));
+    const recovered = await workflow.ingestEvent(provider.normalizeEvent({ id: 'event-2', type: 'payment_succeeded', caseId: 'case-1', providerPaymentId: 'sim_retry_case-1', occurredAt: '2026-01-01T00:00:05.000Z' }, '2026-01-01T00:00:06.000Z'));
 
     expect(recovered.audit.map((entry) => entry.type)).toEqual([
       'case_opened',

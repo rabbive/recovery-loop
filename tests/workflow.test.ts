@@ -27,7 +27,7 @@ describe('RecoveryWorkflow', () => {
     await workflow.runDiagnosis('case-1');
     expect((await workflow.authorize('case-1')).status).toBe('retry_scheduled');
     expect((await workflow.executePending('case-1')).actions[0]?.status).toBe('succeeded');
-    const result = await workflow.ingestEvent(provider.normalizeEvent({ id: 'event-2', type: 'payment_succeeded', caseId: 'case-1', occurredAt: '2026-01-01T00:00:02.000Z' }, '2026-01-01T00:00:03.000Z'));
+    const result = await workflow.ingestEvent(provider.normalizeEvent({ id: 'event-2', type: 'payment_succeeded', caseId: 'case-1', providerPaymentId: 'sim_retry_case-1', occurredAt: '2026-01-01T00:00:02.000Z' }, '2026-01-01T00:00:03.000Z'));
     expect(result.status).toBe('recovered');
     expect(result.recoveredAmount).toBe(1200);
   });
@@ -40,7 +40,7 @@ describe('RecoveryWorkflow', () => {
     await workflow.executePending('case-1');
     expect((await workflow.authorize('case-1')).status).toBe('fallback_link_available');
     await workflow.executePending('case-1');
-    const result = await workflow.ingestEvent(provider.normalizeEvent({ id: 'event-3', type: 'payment_succeeded', caseId: 'case-1', occurredAt: '2026-01-01T00:00:04.000Z' }, '2026-01-01T00:00:05.000Z'));
+    const result = await workflow.ingestEvent(provider.normalizeEvent({ id: 'event-3', type: 'payment_succeeded', caseId: 'case-1', providerPaymentId: 'pay_link_case-1', providerActionReference: 'sim_link_case-1', occurredAt: '2026-01-01T00:00:04.000Z' }, '2026-01-01T00:00:05.000Z'));
     expect(result.actions.filter((action) => action.kind === 'fallback_link')).toHaveLength(1);
     expect(result.status).toBe('recovered');
     expect(provider.calls).toHaveLength(2);
@@ -145,8 +145,8 @@ describe('RecoveryWorkflow', () => {
     await workflow.runDiagnosis('case-1');
     await workflow.authorize('case-1');
     await workflow.executePending('case-1');
-    await workflow.ingestEvent(provider.normalizeEvent({ id: 'event-2', type: 'payment_succeeded', caseId: 'case-1', occurredAt: '2026-01-01T00:00:02.000Z' }, '2026-01-01T00:00:03.000Z'));
-    expect((await workflow.ingestEvent(provider.normalizeEvent({ id: 'event-2', type: 'payment_succeeded', caseId: 'case-1', occurredAt: '2026-01-01T00:00:02.000Z' }, '2026-01-01T00:00:04.000Z'))).status).toBe('recovered');
+    await workflow.ingestEvent(provider.normalizeEvent({ id: 'event-2', type: 'payment_succeeded', caseId: 'case-1', providerPaymentId: 'sim_retry_case-1', occurredAt: '2026-01-01T00:00:02.000Z' }, '2026-01-01T00:00:03.000Z'));
+    expect((await workflow.ingestEvent(provider.normalizeEvent({ id: 'event-2', type: 'payment_succeeded', caseId: 'case-1', providerPaymentId: 'sim_retry_case-1', occurredAt: '2026-01-01T00:00:02.000Z' }, '2026-01-01T00:00:04.000Z'))).status).toBe('recovered');
     expect(provider.calls).toHaveLength(1);
   });
 });
@@ -268,7 +268,7 @@ describe('RecoveryWorkflow diagnosis fail-safe', () => {
   });
 
   it('still attributes a correlated success after the case was escalated', async () => {
-    const { workflow, provider } = setup(undefined, { retry: 'failure', fallback: 'failure', diagnosis: 'transient' });
+    const { workflow, provider } = setup(undefined, { retry: 'success', fallback: 'success', diagnosis: 'transient' });
     await failed(workflow, provider);
     await workflow.runDiagnosis('case-1');
     await workflow.authorize('case-1');
@@ -276,9 +276,79 @@ describe('RecoveryWorkflow diagnosis fail-safe', () => {
     const escalated = await workflow.escalate('case-1', 'operator took over');
     expect(escalated.status).toBe('escalated');
 
-    const result = await workflow.ingestEvent(provider.normalizeEvent({ id: 'event-9', type: 'payment_succeeded', caseId: 'case-1', occurredAt: '2026-01-01T00:00:06.000Z' }, '2026-01-01T00:00:07.000Z'));
+    // The operator gave up on the case, but the retry the provider had already accepted settles.
+    const result = await workflow.ingestEvent(provider.normalizeEvent({ id: 'event-9', type: 'payment_succeeded', caseId: 'case-1', providerPaymentId: 'sim_retry_case-1', occurredAt: '2026-01-01T00:00:06.000Z' }, '2026-01-01T00:00:07.000Z'));
 
     expect(result.status).toBe('recovered');
     expect(result.recoveredAmount).toBe(1200);
+    expect(result.recoveryAttribution).toMatchObject({ actionKind: 'retry', idempotencyKey: 'case-1:retry', providerReference: 'sim_retry_case-1', providerPaymentId: 'sim_retry_case-1', eventId: 'event-9' });
+  });
+});
+
+/**
+ * Recovered Revenue is counted only through explicit correlation, so this is the whole matrix of
+ * what a `payment_succeeded` delivery may and may not claim. Each row is a different piece of
+ * evidence the provider supplied; only the ones that actually name an authorized, executed action
+ * are allowed to move money into the recovered figure.
+ */
+describe('success attribution', () => {
+  async function retriedCase(scenario?: SimulatorScenario) {
+    const { workflow, provider } = setup(undefined, scenario);
+    await failed(workflow, provider);
+    await workflow.runDiagnosis('case-1');
+    await workflow.authorize('case-1');
+    await workflow.executePending('case-1');
+    return { workflow, provider };
+  }
+
+  function success(id: string, occurredAt: string, correlation: { providerPaymentId?: string; providerActionReference?: string }) {
+    return { id, type: 'payment_succeeded' as const, caseId: 'case-1', occurredAt, ...correlation };
+  }
+
+  it('names the action, the payment, and the event behind every recovered figure', async () => {
+    const { workflow, provider } = await retriedCase();
+
+    const result = await workflow.ingestEvent(provider.normalizeEvent(success('event-success', '2026-01-01T00:00:02.000Z', { providerPaymentId: 'sim_retry_case-1' }), '2026-01-01T00:00:03.000Z'));
+
+    expect(result.recoveryAttribution).toMatchObject({
+      actionId: expect.any(String),
+      actionKind: 'retry',
+      idempotencyKey: 'case-1:retry',
+      providerReference: 'sim_retry_case-1',
+      providerPaymentId: 'sim_retry_case-1',
+      eventId: 'event-success',
+    });
+  });
+
+  it('refuses a payment that names no action on the case', async () => {
+    const { workflow, provider } = await retriedCase();
+
+    const result = await workflow.ingestEvent(provider.normalizeEvent(success('event-success', '2026-01-01T00:00:02.000Z', { providerPaymentId: 'pay_somebody_else' }), '2026-01-01T00:00:03.000Z'));
+
+    // The renewal is paid, so the loop stands down — but the money is not ours to claim.
+    expect(result.status).toBe('stopped');
+    expect(result.recoveredAmount).toBe(0);
+    expect(result.recoveryAttribution).toBeUndefined();
+  });
+
+  it('refuses a payment that settled before the action existed', async () => {
+    const { workflow, provider } = await retriedCase();
+
+    const result = await workflow.ingestEvent(provider.normalizeEvent(success('event-success', '2025-12-31T23:59:59.000Z', { providerPaymentId: 'sim_retry_case-1' }), '2026-01-01T00:00:03.000Z'));
+
+    expect(result.status).toBe('stopped');
+    expect(result.recoveredAmount).toBe(0);
+  });
+
+  it('records a payment it cannot claim without disturbing a case that already ended', async () => {
+    const { workflow, provider } = await retriedCase({ retry: 'failure', fallback: 'failure', diagnosis: 'transient' });
+    const exhausted = await workflow.drive('case-1');
+    expect(exhausted.status).toBe('exhausted');
+
+    const result = await workflow.ingestEvent(provider.normalizeEvent(success('event-success', '2026-01-01T00:00:09.000Z', { providerPaymentId: 'pay_somebody_else' }), '2026-01-01T00:00:10.000Z'));
+
+    expect(result.status).toBe('exhausted');
+    expect(result.recoveredAmount).toBe(0);
+    expect(result.audit.map((entry) => entry.type)).toContain('uncorrelated_success');
   });
 });

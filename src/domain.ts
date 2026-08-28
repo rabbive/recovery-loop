@@ -44,9 +44,32 @@ export interface ProviderEvent {
   readonly type: 'payment_failed' | 'payment_succeeded' | 'payment_pending' | 'subscription_cancelled' | 'dispute_opened' | 'unknown';
   readonly caseId: string;
   readonly providerPaymentId?: string;
+  /**
+   * The provider object a recovery action created, when the payment names one. A customer paying
+   * a fallback link produces a payment whose own id the link never carried, so without the link
+   * id the success cannot be tied back to the action that offered it.
+   */
+  readonly providerActionReference?: string;
+  /** The action identity the adapter wrote into the provider's notes, echoed back on the event. */
+  readonly actionIdempotencyKey?: string;
   readonly occurredAt: string;
   readonly receivedAt: string;
   readonly payload: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * Why a renewal counts as recovered revenue. Recovered Revenue is counted only through explicit
+ * correlation, so the figure carries the action that earned it and the provider payment that
+ * settled it: an operator reconciling the dashboard can name both without reading the timeline.
+ */
+export interface RecoveryAttribution {
+  readonly actionId: string;
+  readonly actionKind: 'retry' | 'fallback_link';
+  readonly idempotencyKey: string;
+  readonly providerReference: string;
+  readonly providerPaymentId: string;
+  readonly eventId: string;
+  readonly occurredAt: string;
 }
 
 export interface Diagnosis {
@@ -101,6 +124,7 @@ export type AuditEventType =
   | 'fallback_link_expired'
   | 'late_event_ignored'
   | 'pre_existing_success'
+  | 'uncorrelated_success'
   | 'manual_stop'
   | 'manual_escalation'
   | 'manual_action_ignored';
@@ -129,6 +153,8 @@ export interface RecoveryCase {
   readonly audit: readonly AuditEvent[];
   readonly recoveredAmount: number;
   readonly outcome?: 'recovered' | 'escalated' | 'exhausted' | 'stopped';
+  /** Present exactly when `recoveredAmount` is greater than zero. See `RecoveryAttribution`. */
+  readonly recoveryAttribution?: RecoveryAttribution;
 }
 
 export const terminalStatuses = new Set<CaseStatus>(['recovered', 'escalated', 'exhausted', 'stopped']);
@@ -285,7 +311,48 @@ export function fallbackLinkState(recoveryCase: RecoveryCase, now: string): { re
   return action === undefined ? undefined : { action, live: Date.parse(action.expiresAt ?? '') > Date.parse(now) };
 }
 
-export function markRecovered(recoveryCase: RecoveryCase, now: string): RecoveryCase {
+/**
+ * The Recovery Action a success belongs to, or `undefined` when nothing on the case earned it.
+ *
+ * "The case has an action" is not correlation. A blocked action moved no money, an action created
+ * after the payment cannot have caused it, and a payment naming a different provider object
+ * belongs to someone else. Every condition here is evidence the provider or policy recorded, so a
+ * recovered figure can be traced rather than inferred.
+ */
+export function matchRecoveryAction(recoveryCase: RecoveryCase, event: ProviderEvent): RecoveryAction | undefined {
+  // Reconciliation needs a payment to point at; a success with no payment id names nothing.
+  if (!event.providerPaymentId) return undefined;
+  return recoveryCase.actions.find((action) => {
+    if (action.kind !== 'retry' && action.kind !== 'fallback_link') return false;
+    // References are never synthesized: an action the provider never acknowledged has none.
+    if (!action.providerReference) return false;
+    const referenceMatches = event.providerPaymentId === action.providerReference
+      || event.providerActionReference === action.providerReference
+      || event.actionIdempotencyKey === action.idempotencyKey;
+    if (!referenceMatches) return false;
+    // Policy is the only authorizer, so an action it never allowed cannot earn revenue.
+    const allowed = recoveryCase.decisions.some((decision) =>
+      decision.allowed && decision.action === action.kind && Date.parse(decision.decidedAt) <= Date.parse(action.createdAt));
+    return allowed && Date.parse(event.occurredAt) >= Date.parse(action.createdAt);
+  });
+}
+
+/** Builds the attribution for a matched action, or `undefined` when the match is not reconcilable. */
+export function recoveryAttribution(action: RecoveryAction, event: ProviderEvent): RecoveryAttribution | undefined {
+  if (action.kind !== 'retry' && action.kind !== 'fallback_link') return undefined;
+  if (!action.providerReference || !event.providerPaymentId) return undefined;
+  return {
+    actionId: action.id,
+    actionKind: action.kind,
+    idempotencyKey: action.idempotencyKey,
+    providerReference: action.providerReference,
+    providerPaymentId: event.providerPaymentId,
+    eventId: event.id,
+    occurredAt: event.occurredAt,
+  };
+}
+
+export function markRecovered(recoveryCase: RecoveryCase, attribution: RecoveryAttribution, now: string): RecoveryCase {
   if (!canTransition(recoveryCase.status, 'recovered')) throw new InvalidCaseTransitionError(recoveryCase.status, 'recovered');
-  return { ...recoveryCase, status: 'recovered', outcome: 'recovered', recoveredAmount: recoveryCase.context.amount, updatedAt: now };
+  return { ...recoveryCase, status: 'recovered', outcome: 'recovered', recoveredAmount: recoveryCase.context.amount, recoveryAttribution: attribution, updatedAt: now };
 }

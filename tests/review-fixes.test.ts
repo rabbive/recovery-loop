@@ -12,8 +12,15 @@ function setup(scenario: SimulatorScenario = { retry: 'success', fallback: 'succ
   return { workflow, provider, store, clock };
 }
 
-function event(id: string, type: 'payment_failed' | 'payment_succeeded' | 'subscription_cancelled', occurredAt: string, payload: Record<string, unknown> = {}) {
-  return { id, type, caseId: 'case-1', occurredAt, payload };
+function event(
+  id: string,
+  type: 'payment_failed' | 'payment_succeeded' | 'subscription_cancelled',
+  occurredAt: string,
+  payload: Record<string, unknown> = {},
+  // A success must name the provider object that settled it, or nothing on the case can claim it.
+  correlation: { readonly providerPaymentId?: string } = {},
+) {
+  return { id, type, caseId: 'case-1', occurredAt, payload, ...correlation };
 }
 
 async function openFailedCase(workflow: RecoveryWorkflow, provider: DeterministicSimulator) {
@@ -85,7 +92,7 @@ describe('outcome auditing', () => {
     await workflow.authorize('case-1');
     await workflow.executePending('case-1');
 
-    const recovered = await workflow.ingestEvent(provider.normalizeEvent(event('event-2', 'payment_succeeded', '2026-01-01T00:00:05.000Z'), '2026-01-01T00:00:06.000Z'));
+    const recovered = await workflow.ingestEvent(provider.normalizeEvent(event('event-2', 'payment_succeeded', '2026-01-01T00:00:05.000Z', {}, { providerPaymentId: 'sim_retry_case-1' }), '2026-01-01T00:00:06.000Z'));
 
     expect(recovered.audit.map((entry) => entry.type)).toContain('case_recovered');
     expect(recovered.audit.at(-1)?.data).toMatchObject({ recoveredAmount: 1200 });

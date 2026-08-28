@@ -33,11 +33,6 @@ const FAILURE_CODES = {
 export type EvaluationOutcome =
   | 'recovered_by_retry'
   | 'recovered_by_fallback'
-  /**
-   * The renewal was collected after approved actions, but none of them is still standing, so no
-   * single action can be credited. It is recovered revenue and deliberately left unattributed.
-   */
-  | 'recovered_unattributed'
   | 'escalated'
   | 'exhausted'
   | 'stopped'
@@ -56,6 +51,8 @@ export interface EvaluationEventStep {
   readonly id: string;
   readonly type: ProviderEvent['type'];
   readonly providerPaymentId?: string;
+  /** The provider object the settling action created, so a success names the action that earned it. */
+  readonly providerActionReference?: string;
   /** Offset from the case's start. A delayed delivery carries an earlier offset than the step before it. */
   readonly occurredOffsetMilliseconds: number;
   readonly payload?: Readonly<Record<string, unknown>>;
@@ -104,13 +101,20 @@ function duplicateOf(step: EvaluationEventStep, occurredOffsetMilliseconds: numb
   return { ...step, delivery: 'duplicate', occurredOffsetMilliseconds };
 }
 
-function succeededEvent(id: string, occurredOffsetMilliseconds: number, suffix = 'succeeded'): EvaluationEventStep {
+/**
+ * A settled renewal, naming the action that collected it exactly as the provider would. A retry is
+ * charged directly, so the payment carries the retry's own reference; a fallback link is paid by
+ * the customer under a fresh payment id, so the link is named separately. `settledBy: 'nothing'`
+ * is a renewal paid outside the loop, which names no action and must not count as recovered.
+ */
+function succeededEvent(id: string, occurredOffsetMilliseconds: number, settledBy: 'retry' | 'fallback_link' | 'nothing', suffix = 'succeeded'): EvaluationEventStep {
   return {
     kind: 'event',
     delivery: 'first',
     id: `${id}:${suffix}`,
     type: 'payment_succeeded',
-    providerPaymentId: `${id}:recovery-payment`,
+    providerPaymentId: settledBy === 'retry' ? `sim_retry_${id}` : `${id}:recovery-payment`,
+    ...(settledBy === 'fallback_link' ? { providerActionReference: `sim_link_${id}` } : {}),
     occurredOffsetMilliseconds,
     payload: { method: 'recurring_mandate' },
   };
@@ -131,13 +135,13 @@ const ARCHETYPE_DEFINITIONS = {
   transient_retry_recovered: {
     simulator: { retry: 'success', fallback: 'success', diagnosis: 'transient' },
     expected: { failureCategory: 'transient', safeAction: 'retry', outcome: 'recovered_by_retry', recoversRevenue: true },
-    steps: (id) => [...mandateFailureWithRedelivery(id), { kind: 'drive' }, { kind: 'replay' }, succeededEvent(id, 60_000), { kind: 'drive' }],
+    steps: (id) => [...mandateFailureWithRedelivery(id), { kind: 'drive' }, { kind: 'replay' }, succeededEvent(id, 60_000, 'retry'), { kind: 'drive' }],
   },
   duplicate_success_delivery_recovered: {
     simulator: { retry: 'success', fallback: 'success', diagnosis: 'transient' },
     expected: { failureCategory: 'transient', safeAction: 'retry', outcome: 'recovered_by_retry', recoversRevenue: true },
     steps: (id) => {
-      const success = succeededEvent(id, 60_000);
+      const success = succeededEvent(id, 60_000, 'retry');
       return [...mandateFailureWithRedelivery(id), { kind: 'drive' }, success, duplicateOf(success, 61_000), { kind: 'drive' }];
     },
   },
@@ -147,7 +151,7 @@ const ARCHETYPE_DEFINITIONS = {
     steps: (id) => [
       ...mandateFailureWithRedelivery(id),
       { kind: 'drive' },
-      succeededEvent(id, 60_000),
+      succeededEvent(id, 60_000, 'retry'),
       // A failure that was in flight while the renewal was collected, and a dispute signal that
       // contradicts the settled outcome. Neither may re-open a recovered case.
       { kind: 'event', delivery: 'delayed', id: `${id}:late-failed`, type: 'payment_failed', providerPaymentId: `${id}:payment`, occurredOffsetMilliseconds: 30_000, payload: { method: 'recurring_mandate', failureCode: FAILURE_CODES.temporary } },
@@ -158,7 +162,7 @@ const ARCHETYPE_DEFINITIONS = {
   retry_failed_fallback_recovered: {
     simulator: { retry: 'failure', fallback: 'success', diagnosis: 'transient' },
     expected: { failureCategory: 'transient', safeAction: 'retry', outcome: 'recovered_by_fallback', recoversRevenue: true },
-    steps: (id) => [...mandateFailureWithRedelivery(id), { kind: 'drive' }, { kind: 'replay' }, { kind: 'drive' }, succeededEvent(id, 120_000, 'link-paid'), { kind: 'drive' }],
+    steps: (id) => [...mandateFailureWithRedelivery(id), { kind: 'drive' }, { kind: 'replay' }, { kind: 'drive' }, succeededEvent(id, 120_000, 'fallback_link', 'link-paid'), { kind: 'drive' }],
   },
   fallback_link_lapsed_exhausted: {
     simulator: { retry: 'failure', fallback: 'success', diagnosis: 'transient' },
@@ -171,11 +175,19 @@ const ARCHETYPE_DEFINITIONS = {
     steps: (id) => [...mandateFailureWithRedelivery(id), { kind: 'drive' }, { kind: 'drive' }, { kind: 'replay' }, { kind: 'drive' }],
   },
   late_success_after_exhaustion_recovered: {
-    simulator: { retry: 'failure', fallback: 'failure', diagnosis: 'transient' },
-    // The customer paid after the loop had run out of rungs. The money is real recovered revenue,
-    // but no surviving action can be credited with collecting it.
-    expected: { failureCategory: 'transient', safeAction: 'retry', outcome: 'recovered_unattributed', recoversRevenue: true },
-    steps: (id) => [...mandateFailureWithRedelivery(id), { kind: 'drive' }, { kind: 'drive' }, succeededEvent(id, 180_000, 'settled-late'), { kind: 'drive' }],
+    simulator: { retry: 'failure', fallback: 'success', diagnosis: 'transient' },
+    // The customer paid the fallback link after it had lapsed and the loop had given up. The money
+    // is real recovered revenue and the expired link still names the action that earned it.
+    expected: { failureCategory: 'transient', safeAction: 'retry', outcome: 'recovered_by_fallback', recoversRevenue: true },
+    steps: (id) => [
+      ...mandateFailureWithRedelivery(id),
+      { kind: 'drive' },
+      { kind: 'drive' },
+      { kind: 'advance', milliseconds: BEYOND_LINK_EXPIRY_MILLISECONDS },
+      { kind: 'expire' },
+      succeededEvent(id, 180_000 + BEYOND_LINK_EXPIRY_MILLISECONDS, 'fallback_link', 'settled-late'),
+      { kind: 'drive' },
+    ],
   },
   hard_decline_escalated: {
     simulator: { retry: 'failure', fallback: 'failure', diagnosis: 'hard_decline' },
@@ -196,13 +208,13 @@ const ARCHETYPE_DEFINITIONS = {
     simulator: { retry: 'unsupported', fallback: 'success', diagnosis: 'transient' },
     // No authorized mandate, so the provider refuses the retry and the loop steps down a rung.
     expected: { failureCategory: 'transient', safeAction: 'fallback_link', outcome: 'recovered_by_fallback', recoversRevenue: true },
-    steps: (id) => [failedEvent(id, { method: 'card', failureCode: FAILURE_CODES.temporary }), { kind: 'drive' }, { kind: 'replay' }, succeededEvent(id, 120_000, 'link-paid'), { kind: 'drive' }],
+    steps: (id) => [failedEvent(id, { method: 'card', failureCode: FAILURE_CODES.temporary }), { kind: 'drive' }, { kind: 'replay' }, succeededEvent(id, 120_000, 'fallback_link', 'link-paid'), { kind: 'drive' }],
   },
   pre_existing_success_stopped: {
     simulator: { retry: 'success', fallback: 'success', diagnosis: 'transient' },
     // The renewal was paid outside the loop before anything was authorized.
     expected: { failureCategory: 'transient', safeAction: 'none', outcome: 'stopped', recoversRevenue: false },
-    steps: (id) => [...mandateFailureWithRedelivery(id), succeededEvent(id, 30_000, 'settled-elsewhere'), { kind: 'drive' }],
+    steps: (id) => [...mandateFailureWithRedelivery(id), succeededEvent(id, 30_000, 'nothing', 'settled-elsewhere'), { kind: 'drive' }],
   },
   cancelled_subscription_escalated: {
     simulator: { retry: 'success', fallback: 'success', diagnosis: 'transient' },
@@ -293,7 +305,6 @@ export interface EvaluationMetrics {
   readonly fallbackRecoveredCases: number;
   readonly fallbackRecoveryRate: number;
   /** Recovered cases no surviving action can be credited with, rather than crediting one falsely. */
-  readonly unattributedRecoveredCases: number;
   readonly escalatedCases: number;
   readonly escalationRate: number;
   readonly exhaustedCases: number;
@@ -459,18 +470,19 @@ export function generateEvaluationCases(count = 60, seed = 42): EvaluationCase[]
   });
 }
 
-/** Which surviving action collected the renewal, or `none` when none can be credited. */
+/**
+ * Which action collected the renewal, read from the attribution the workflow persisted. Guessing
+ * from the surviving actions would credit whichever rung happened to be standing; the attribution
+ * names the action the provider's own payment pointed at.
+ */
 function recoveryPathOf(recoveryCase: RecoveryCase): RecoveryPath {
-  if (recoveryCase.status !== 'recovered') return 'none';
-  const standing = recoveryCase.actions.filter((action) => action.status !== 'failed' && action.status !== 'blocked');
-  if (standing.some((action) => action.kind === 'fallback_link')) return 'fallback_link';
-  return standing.some((action) => action.kind === 'retry') ? 'retry' : 'none';
+  return recoveryCase.recoveryAttribution?.actionKind ?? 'none';
 }
 
 function outcomeOf(recoveryCase: RecoveryCase, path: RecoveryPath): EvaluationOutcome {
   switch (recoveryCase.status) {
     case 'recovered':
-      return path === 'fallback_link' ? 'recovered_by_fallback' : path === 'retry' ? 'recovered_by_retry' : 'recovered_unattributed';
+      return path === 'fallback_link' ? 'recovered_by_fallback' : 'recovered_by_retry';
     case 'escalated': return 'escalated';
     case 'exhausted': return 'exhausted';
     case 'stopped': return 'stopped';
@@ -514,6 +526,7 @@ async function runCase(evaluationCase: EvaluationCase, startedAt: string, engine
         type: step.type,
         caseId: evaluationCase.id,
         ...(step.providerPaymentId === undefined ? {} : { providerPaymentId: step.providerPaymentId }),
+        ...(step.providerActionReference === undefined ? {} : { providerActionReference: step.providerActionReference }),
         occurredAt: new Date(startedAtMilliseconds + step.occurredOffsetMilliseconds).toISOString(),
         ...(step.payload === undefined ? {} : { payload: step.payload }),
       }, clock.now().toISOString());
@@ -624,11 +637,11 @@ export async function runEvaluation(
   const recoveredCases = count((result) => result.recoveredAmount > 0);
   const retryRecoveredCases = count((result) => result.recoveryPath === 'retry');
   const fallbackRecoveredCases = count((result) => result.recoveryPath === 'fallback_link');
-  const unattributedRecoveredCases = count((result) => result.outcome === 'recovered_unattributed');
   // Recovered money and recovered cases are counted independently, so a batch that cannot
-  // reconcile the two must fail rather than publish a total no case outcome accounts for.
-  if (recoveredCases !== retryRecoveredCases + fallbackRecoveredCases + unattributedRecoveredCases) {
-    throw new Error(`Recovered revenue does not reconcile to case outcomes: ${recoveredCases} cases hold recovered revenue but ${retryRecoveredCases + fallbackRecoveredCases + unattributedRecoveredCases} are attributed`);
+  // reconcile the two must fail rather than publish a total no case outcome accounts for. Every
+  // recovered case now carries an attribution, so the two sides must agree exactly.
+  if (recoveredCases !== retryRecoveredCases + fallbackRecoveredCases) {
+    throw new Error(`Recovered revenue does not reconcile to case outcomes: ${recoveredCases} cases hold recovered revenue but ${retryRecoveredCases + fallbackRecoveredCases} are attributed`);
   }
   const escalatedCases = count((result) => result.outcome === 'escalated');
   const exhaustedCases = count((result) => result.outcome === 'exhausted');
@@ -652,7 +665,6 @@ export async function runEvaluation(
       retryRecoveryRate: rate(retryRecoveredCases, totalCases),
       fallbackRecoveredCases,
       fallbackRecoveryRate: rate(fallbackRecoveredCases, totalCases),
-      unattributedRecoveredCases,
       escalatedCases,
       escalationRate: rate(escalatedCases, totalCases),
       exhaustedCases,

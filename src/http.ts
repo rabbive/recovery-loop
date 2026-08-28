@@ -200,11 +200,17 @@ function header(request: IncomingMessage, name: string): string | undefined {
 
 /** Projects a provider webhook body into the normalized event input, or undefined when unidentifiable. */
 export function webhookInput(payload: Record<string, unknown>, fallbackId?: string): NormalizedEventInput | undefined {
-  const metadata = typeof payload.metadata === 'object' && payload.metadata !== null ? payload.metadata as Record<string, unknown> : {};
-  const nestedPayload = typeof payload.payload === 'object' && payload.payload !== null ? payload.payload as Record<string, unknown> : {};
-  const payment = typeof nestedPayload.payment === 'object' && nestedPayload.payment !== null ? nestedPayload.payment as Record<string, unknown> : {};
-  const entity = typeof payment.entity === 'object' && payment.entity !== null ? payment.entity as Record<string, unknown> : {};
-  const notes = typeof entity.notes === 'object' && entity.notes !== null ? entity.notes as Record<string, unknown> : {};
+  const objectValue = (value: unknown): Record<string, unknown> =>
+    typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const metadata = objectValue(payload.metadata);
+  const nestedPayload = objectValue(payload.payload);
+  const payment = objectValue(nestedPayload.payment);
+  const entity = objectValue(payment.entity);
+  const notes = objectValue(entity.notes);
+  // A customer paying a fallback link produces a payment under its own id, so the link entity is
+  // the only place the delivery names the action that offered it.
+  const paymentLink = objectValue(objectValue(nestedPayload.payment_link).entity);
+  const paymentLinkNotes = objectValue(paymentLink.notes);
   const caseId = stringValue(payload.caseId) ?? stringValue(metadata.caseId) ?? stringValue(notes.caseId);
   const id = stringValue(payload.id) ?? stringValue(payload.eventId) ?? fallbackId ?? stringValue(entity.id);
   const occurredAt = stringValue(payload.occurredAt) ?? stringValue(payload.createdAt) ?? new Date().toISOString();
@@ -216,6 +222,8 @@ export function webhookInput(payload: Record<string, unknown>, fallbackId?: stri
           : rawType === 'dispute.created' || rawType === 'dispute_opened' ? 'dispute_opened' : 'unknown';
   if (!caseId || !id) return undefined;
   const providerPaymentId = stringValue(payload.providerPaymentId) ?? stringValue(entity.id);
+  const providerActionReference = stringValue(payload.providerActionReference) ?? stringValue(entity.payment_link_id) ?? stringValue(paymentLink.id);
+  const actionIdempotencyKey = stringValue(payload.actionIdempotencyKey) ?? stringValue(notes.recoveryActionKey) ?? stringValue(paymentLinkNotes.recoveryActionKey);
   // Razorpay nests the method and failure code on the payment entity, but the domain reads them
   // off the event payload. Lift them here so a real body can still take the retry rung.
   const method = stringValue(payload.method) ?? stringValue(entity.method);
@@ -223,6 +231,8 @@ export function webhookInput(payload: Record<string, unknown>, fallbackId?: stri
   return {
     id, type, caseId,
     ...(providerPaymentId === undefined ? {} : { providerPaymentId }),
+    ...(providerActionReference === undefined ? {} : { providerActionReference }),
+    ...(actionIdempotencyKey === undefined ? {} : { actionIdempotencyKey }),
     occurredAt,
     payload: { ...payload, ...(method === undefined ? {} : { method }), ...(failureCode === undefined ? {} : { failureCode }) },
   };

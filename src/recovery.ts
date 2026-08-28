@@ -9,6 +9,8 @@ import {
   fallbackLinkState,
   isTerminal,
   markRecovered,
+  matchRecoveryAction,
+  recoveryAttribution,
   renewalContextViolation,
   updateAction,
   withDiagnosis,
@@ -19,6 +21,7 @@ import {
   type PolicyDecision,
   type ProviderEvent,
   type RecoveryAction,
+  type RecoveryAttribution,
   type RecoveryCase,
   type RenewalContext,
 } from './domain.js';
@@ -273,12 +276,17 @@ export class RecoveryWorkflow {
     updated = appendAudit(updated, { type: 'provider_event_received', actor: 'provider', at: event.receivedAt, explanation: `Received ${event.type}`, data: { eventId: event.id } });
     const ignore = (explanation: string): RecoveryCase => appendAudit(updated, { type: 'late_event_ignored', actor: 'provider', at: event.receivedAt, explanation, data: { eventId: event.id, eventType: event.type, status: current.status } });
     if (event.type === 'payment_succeeded') {
-      const caused = current.actions.some((action) => action.kind === 'retry' || action.kind === 'fallback_link');
+      const matched = matchRecoveryAction(current, event);
+      const attribution = matched === undefined ? undefined : recoveryAttribution(matched, event);
       updated = current.status === 'recovered'
         ? ignore('The renewal was already recovered')
-        : caused && canTransition(current.status, 'recovered')
-          ? this.recover(updated, event.occurredAt)
-          : this.standDown(updated, event);
+        : attribution !== undefined && canTransition(current.status, 'recovered')
+          ? this.recover(updated, attribution, event.occurredAt)
+          : isTerminal(current.status)
+            // The renewal was paid, but nothing this case did earned it. Recording that keeps the
+            // outcome honest without silently booking someone else's payment as recovered revenue.
+            ? appendAudit(updated, { type: 'uncorrelated_success', actor: 'provider', at: event.receivedAt, explanation: 'A payment settled that no recovery action on this case can claim', data: { eventId: event.id, providerPaymentId: event.providerPaymentId ?? null, status: current.status } })
+            : this.standDown(updated, event);
     } else if (isTerminal(current.status)) {
       updated = ignore('A terminal case cannot change state after this provider signal');
     } else if (event.type === 'payment_failed') {
@@ -361,9 +369,14 @@ export class RecoveryWorkflow {
     return appendAudit(withStatus(recoveryCase, status, at, status), { type: `case_${status}`, actor: 'system', at, explanation, data });
   }
 
-  private recover(recoveryCase: RecoveryCase, at: string): RecoveryCase {
-    const recovered = markRecovered(recoveryCase, at);
-    return appendAudit(recovered, { type: 'case_recovered', actor: 'system', at, explanation: 'A recovery action collected the renewal', data: { recoveredAmount: recovered.recoveredAmount } });
+  private recover(recoveryCase: RecoveryCase, attribution: RecoveryAttribution, at: string): RecoveryCase {
+    const recovered = markRecovered(recoveryCase, attribution, at);
+    // Naming the action and the payment is what makes the figure reconcilable: an operator can say
+    // which intervention earned the money, not merely that the case had one.
+    return appendAudit(recovered, {
+      type: 'case_recovered', actor: 'system', at, explanation: `The ${attribution.actionKind} action collected the renewal`,
+      data: { recoveredAmount: recovered.recoveredAmount, action: attribution.actionKind, idempotencyKey: attribution.idempotencyKey, providerPaymentId: attribution.providerPaymentId },
+    });
   }
 
   private escalateCase(recoveryCase: RecoveryCase, explanation: string, at: string): RecoveryCase { return this.settle(recoveryCase, 'escalated', at, explanation); }

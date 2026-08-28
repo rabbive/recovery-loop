@@ -14,8 +14,15 @@ function setup(scenario: SimulatorScenario = { retry: 'success', fallback: 'succ
   return { workflow, provider, store };
 }
 
-function event(id: string, type: 'payment_failed' | 'payment_succeeded' | 'payment_pending' | 'subscription_cancelled' | 'dispute_opened' | 'unknown', occurredAt: string, payload: Record<string, unknown> = {}) {
-  return { id, type, caseId: 'case-1', occurredAt, payload };
+function event(
+  id: string,
+  type: 'payment_failed' | 'payment_succeeded' | 'payment_pending' | 'subscription_cancelled' | 'dispute_opened' | 'unknown',
+  occurredAt: string,
+  payload: Record<string, unknown> = {},
+  // A success must name the provider object that settled it, or nothing on the case can claim it.
+  correlation: { readonly providerPaymentId?: string; readonly providerActionReference?: string } = {},
+) {
+  return { id, type, caseId: 'case-1', occurredAt, payload, ...correlation };
 }
 
 async function openFailedCase(workflow: RecoveryWorkflow, provider: DeterministicSimulator) {
@@ -25,26 +32,31 @@ async function openFailedCase(workflow: RecoveryWorkflow, provider: Deterministi
 
 describe('event ordering', () => {
   it('attributes a success that lands after the retry was already recorded as failed', async () => {
-    // The provider settled the retry late: the action is marked failed, then the money arrives.
-    const { workflow, provider } = setup({ retry: 'failure', fallback: 'success', diagnosis: 'transient' });
-    await openFailedCase(workflow, provider);
-    await workflow.runDiagnosis('case-1');
-    await workflow.authorize('case-1');
-    expect((await workflow.executePending('case-1')).status).toBe('diagnosed');
-
-    const recovered = await workflow.ingestEvent(provider.normalizeEvent(event('event-2', 'payment_succeeded', '2026-01-01T00:05:00.000Z'), '2026-01-01T00:05:01.000Z'));
-
-    expect(recovered.status).toBe('recovered');
-    expect(recovered.recoveredAmount).toBe(1200);
-  });
-
-  it('never offers a fallback link to a customer who already paid', async () => {
-    const { workflow, provider } = setup({ retry: 'failure', fallback: 'success', diagnosis: 'transient' });
+    // The provider accepted the retry, later reported it failed, and the money arrived after all.
+    const { workflow, provider, store } = setup();
     await openFailedCase(workflow, provider);
     await workflow.runDiagnosis('case-1');
     await workflow.authorize('case-1');
     await workflow.executePending('case-1');
-    await workflow.ingestEvent(provider.normalizeEvent(event('event-2', 'payment_succeeded', '2026-01-01T00:05:00.000Z'), '2026-01-01T00:05:01.000Z'));
+    // The Razorpay adapter answers `submitted`, so the real outcome only arrives as a webhook.
+    const submitted = await store.get('case-1');
+    await store.save({ ...submitted!, actions: submitted!.actions.map((action) => ({ ...action, status: 'submitted' as const })) });
+    await workflow.ingestEvent(provider.normalizeEvent(event('event-2', 'payment_failed', '2026-01-01T00:01:00.000Z', { method: 'recurring_mandate' }), '2026-01-01T00:01:01.000Z'));
+
+    const recovered = await workflow.ingestEvent(provider.normalizeEvent(event('event-3', 'payment_succeeded', '2026-01-01T00:05:00.000Z', {}, { providerPaymentId: 'sim_retry_case-1' }), '2026-01-01T00:05:01.000Z'));
+
+    expect(recovered.status).toBe('recovered');
+    expect(recovered.recoveredAmount).toBe(1200);
+    expect(recovered.recoveryAttribution?.actionKind).toBe('retry');
+  });
+
+  it('never offers a fallback link to a customer who already paid', async () => {
+    const { workflow, provider } = setup();
+    await openFailedCase(workflow, provider);
+    await workflow.runDiagnosis('case-1');
+    await workflow.authorize('case-1');
+    await workflow.executePending('case-1');
+    await workflow.ingestEvent(provider.normalizeEvent(event('event-2', 'payment_succeeded', '2026-01-01T00:05:00.000Z', {}, { providerPaymentId: 'sim_retry_case-1' }), '2026-01-01T00:05:01.000Z'));
 
     const afterSuccess = await workflow.authorize('case-1');
     await workflow.executePending('case-1');
@@ -71,7 +83,7 @@ describe('event ordering', () => {
     await workflow.runDiagnosis('case-1');
     await workflow.authorize('case-1');
     await workflow.executePending('case-1');
-    await workflow.ingestEvent(provider.normalizeEvent(event('event-2', 'payment_succeeded', '2026-01-01T00:00:04.000Z'), '2026-01-01T00:00:05.000Z'));
+    await workflow.ingestEvent(provider.normalizeEvent(event('event-2', 'payment_succeeded', '2026-01-01T00:00:04.000Z', {}, { providerPaymentId: 'sim_retry_case-1' }), '2026-01-01T00:00:05.000Z'));
 
     const late = await workflow.ingestEvent(provider.normalizeEvent(event('event-3', 'payment_failed', '2026-01-01T00:00:03.000Z', { method: 'recurring_mandate' }), '2026-01-01T00:00:06.000Z'));
 
@@ -86,7 +98,7 @@ describe('event ordering', () => {
     await succeededFirst.workflow.runDiagnosis('case-1');
     await succeededFirst.workflow.authorize('case-1');
     await succeededFirst.workflow.executePending('case-1');
-    await succeededFirst.workflow.ingestEvent(succeededFirst.provider.normalizeEvent(event('event-2', 'payment_succeeded', '2026-01-01T00:00:04.000Z'), '2026-01-01T00:00:05.000Z'));
+    await succeededFirst.workflow.ingestEvent(succeededFirst.provider.normalizeEvent(event('event-2', 'payment_succeeded', '2026-01-01T00:00:04.000Z', {}, { providerPaymentId: 'sim_retry_case-1' }), '2026-01-01T00:00:05.000Z'));
     const afterCancellation = await succeededFirst.workflow.ingestEvent(succeededFirst.provider.normalizeEvent(event('event-3', 'subscription_cancelled', '2026-01-01T00:00:06.000Z'), '2026-01-01T00:00:07.000Z'));
 
     expect(afterCancellation.status).toBe('recovered');

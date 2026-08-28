@@ -57,13 +57,18 @@ function failedRenewal(caseId: string, eventId: string, occurredAt: string, cont
   };
 }
 
+/**
+ * The renewal settling. The payment carries the simulator's retry reference because that is what a
+ * charged mandate returns: without it the loop cannot tell this money from a payment made outside
+ * the case, and correctly refuses to book it as recovered revenue.
+ */
 function capturedRenewal(caseId: string, eventId: string, occurredAt: string): Record<string, unknown> {
   return {
     id: eventId,
     type: 'payment.captured',
     caseId,
     occurredAt,
-    providerPaymentId: `pay_${eventId}`,
+    providerPaymentId: `sim_retry_${caseId}`,
     method: 'recurring_mandate',
   };
 }

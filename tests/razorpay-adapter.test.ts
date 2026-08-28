@@ -86,6 +86,8 @@ describe('Razorpay Test Mode recurring retry', () => {
     expect(order?.body.receipt).toBe('case-1:retry');
     expect(order?.body.amount).toBe(4999);
     expect(order?.body.currency).toBe('INR');
+    // The notes are how a later webhook names this action, so recovered revenue can be attributed.
+    expect(order?.body.notes).toMatchObject({ caseId: 'case-1', recoveryActionKey: 'case-1:retry' });
     const charge = requests.find((request) => request.url.endsWith('/v1/payments/create/recurring'));
     expect(charge?.body).toMatchObject({ token: 'token_1', customer_id: 'cust_1', email: 'renewal@example.com', contact: '+919900000000', order_id: 'order_Rz1', currency: 'INR', amount: 4999, recurring: true });
     // `recurring` is a boolean because that is the type Razorpay's API reference gives it. Recurring

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ExpirySweeper, startExpiryScheduler, type ExpirySweepResult } from '../src/expiry.js';
-import { FixedClock } from '../src/provider.js';
-import { InMemoryRecoveryStore, type ExpiryResult, type RecoveryStore, type RecoveryWorkflow } from '../src/recovery.js';
+import { DeterministicSimulator, FixedClock } from '../src/provider.js';
+import { DeterministicPolicy, FixtureDiagnosisEngine, InMemoryRecoveryStore, RecoveryWorkflow, type ExpiryResult, type RecoveryStore } from '../src/recovery.js';
 import { addAction, appendAudit, createRecoveryCase, updateAction, withStatus, type RecoveryCase } from '../src/domain.js';
 
 const START = '2026-01-01T00:00:00.000Z';
@@ -86,6 +86,37 @@ describe('bounded expiry sweep', () => {
     } as unknown as RecoveryWorkflow;
 
     const result = await new ExpirySweeper(finder, settled, new FixedClock(AFTER_EXPIRY)).sweep();
+
+    expect(result.inspected).toBe(1);
+    expect(result.expiredCaseIds).toEqual([]);
+  });
+
+  it('omits a stale due id that the real workflow finds terminal under the case lock', async () => {
+    const clock = new FixedClock(AFTER_EXPIRY);
+    const store = new InMemoryRecoveryStore();
+    await store.save(lapsedCase('case-1'));
+    const finder: RecoveryStore = {
+      get: (id) => store.get(id),
+      all: () => store.all(),
+      save: (value) => store.save(value),
+      withCaseLock: (id, operation) => store.withCaseLock(id, operation),
+      healthCheck: () => store.healthCheck(),
+      findLapsedFallbackCaseIds: async (now, limit) => {
+        const staleDueIds = await store.findLapsedFallbackCaseIds(now, limit);
+        const current = await store.get('case-1');
+        if (current) await store.save(withStatus(current, 'stopped', AFTER_EXPIRY, 'stopped'));
+        return staleDueIds;
+      },
+    };
+    const workflow = new RecoveryWorkflow(
+      finder,
+      new DeterministicSimulator(new Map(), clock),
+      new FixtureDiagnosisEngine(),
+      new DeterministicPolicy(),
+      clock,
+    );
+
+    const result = await new ExpirySweeper(finder, workflow, clock).sweep();
 
     expect(result.inspected).toBe(1);
     expect(result.expiredCaseIds).toEqual([]);

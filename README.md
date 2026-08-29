@@ -32,7 +32,7 @@ The MVP uses a deterministic simulator for reproducible synthetic evaluation and
 
 ## Development
 
-Requirements: Node.js 22+.
+Requirements: Node.js 22.12 or later within Node 22. Later Node majors are not supported.
 
 ```bash
 npm install
@@ -85,7 +85,7 @@ Action identity is `RecoveryAction.idempotencyKey`. The simulator replays a reco
 
 - **Recurring retry.** It reads the original payment (`GET /v1/payments/:id`) and requires a complete mandate token, customer, email, contact, amount, and currency. An explicit negative `recurring` flag refuses the charge; the undocumented absence of that field does not. Before any POST, the provider customer, original order, amount, and currency must equal the registered case, and the subscription id in the payment or original-order notes must match. It then creates a new order (`POST /v1/orders`) whose `receipt` is the action identity and charges the mandate (`POST /v1/payments/create/recurring`) with those verified provider terms. The order and charge notes carry `caseId`, `subscriptionId`, and `recoveryActionKey`. The response only means *submitted*; the webhook decides the outcome.
 - **Expiring fallback link.** `POST /v1/payment_links` with the action identity as `reference_id` and an `expire_by` 24 hours ahead of the injected clock.
-- **Idempotency.** Before creating an order the adapter looks the receipt up (`GET /v1/orders?receipt=...`). It reuses the result only when its receipt, amount, currency, `caseId`, `subscriptionId`, and raw `recoveryActionKey` all match the verified action. When that action order already has any payment (`GET /v1/orders/:id/payments`), including `created` or `failed`, it returns that payment id with `idempotent: true` instead of charging again. This makes replay safe if the process dies after Razorpay accepts a charge but before the caller records its response. An existing action order with no payment is reused, which also covers a crash after order creation. A duplicate-order response is resolved through the same receipt lookup. An identity longer than Razorpay's 40-character limit is folded deterministically to a 31-character prefix plus a SHA-256 suffix. Razorpay does not document receipt uniqueness, so the initial lookup and create are not an atomic concurrency guarantee. A retry is refused once any attempt on the case has succeeded, and targets the latest failed mandate attempt, so a renewal that is already paid is never charged again.
+- **Idempotency.** Before creating an order the adapter looks the receipt up (`GET /v1/orders?receipt=...`). It reuses the result only when its receipt, amount, currency, `caseId`, `subscriptionId`, and raw `recoveryActionKey` all match the verified action. When that action order already has any payment (`GET /v1/orders/:id/payments`), including `created` or `failed`, it returns that payment id with `idempotent: true` instead of charging again. This makes replay safe if the process dies after Razorpay accepts a charge but before the caller records its response. An existing action order with no payment is reused, which also covers a crash after order creation. A duplicate-order response is resolved through the same receipt lookup. Razorpay's current Create Order API requires `receipt` to be unique and no longer than 40 characters, so a longer action identity is folded deterministically to a 31-character prefix plus a SHA-256 suffix. The adapter's lookup and create are still two HTTP requests rather than one transaction: simultaneous first submissions can both observe no order, then rely on Razorpay rejecting the duplicate receipt and the adapter resolving the existing order through the same lookup. A retry is refused once any attempt on the case has succeeded, and targets the latest failed mandate attempt, so a renewal that is already paid is never charged again.
 - **Error mapping.** Non-2xx responses, transport failures, a missing payment id, and missing credentials all map to a `failed` result carrying Razorpay's own description — never an exception, never a synthesized provider reference.
 - **Unsupported operations.** A case with no authorized recurring mandate fails with the reason instead of pretending an arbitrary card can be recharged.
 
@@ -214,8 +214,8 @@ Synthetic results must not be presented as expected production performance. Razo
 ## Deployment
 
 The public demo runs on Heroku. `Procfile` names the web process; Heroku runs `npm run build`
-automatically because the package defines a build script. `engines.node` is pinned to `22.x` so a
-deploy cannot silently move to a Node major nothing here has been tested against.
+automatically because the package defines a build script. The application requires Node 22.12 or
+later within Node 22; `engines.node` is `>=22.12.0 <23`, so a deploy cannot float to a later major.
 
 The instance runs without Razorpay credentials on purpose: without them the app uses the
 deterministic simulator, which is what the published batch figures are built on. The replay lab

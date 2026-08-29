@@ -227,7 +227,7 @@ For the adapter this matters: these surface at `src/provider.ts:292` as `status:
 
 Source: https://razorpay.com/docs/payments/recurring-payments/cards/faqs/
 
-**Implementation choice, revised 2026-08-29:** this FAQ conflicts with the create-subsequent-payment reference in section 3.2, which says, "You have to create a new order every time you want to charge your customers." The adapter follows that API reference. It verifies that the original failed payment belongs to the registered customer, order, subscription, amount, and currency, then creates a fresh order whose `receipt` is the recovery action identity. A replay accepts that order only when its receipt, notes, amount, and currency still match the action and registered case, then treats any payment on it, including `created` or `failed`, as the same submitted action. This prevents a process-crash replay from issuing a second charge. A duplicate-order response is resolved through the same lookup. The implementation therefore does **not** perform the FAQ's same-order retry operation, and it does not model the 36-hour spacing. Recurring retry remains disabled pending the live proof gate below.
+**Implementation choice, revised 2026-08-29:** this FAQ conflicts with the create-subsequent-payment reference in section 3.2, which says, "You have to create a new order every time you want to charge your customers." The adapter follows that API reference. It verifies that the original failed payment belongs to the registered customer, order, subscription, amount, and currency, then creates a fresh order whose `receipt` is the recovery action identity. Razorpay's current [Create Order API](https://razorpay.com/docs/api/orders/create/) says `receipt` has a maximum length of 40 characters and must be unique. A replay accepts that order only when its receipt, notes, amount, and currency still match the action and registered case, then treats any payment on it, including `created` or `failed`, as the same submitted action. This prevents a process-crash replay from issuing a second charge. The provider's uniqueness constraint does not make the adapter's lookup-then-create sequence transactional across two HTTP requests: simultaneous first submissions can both observe no order, then rely on Razorpay rejecting the duplicate receipt and the adapter resolving the existing order through the same lookup. The implementation therefore does **not** perform the FAQ's same-order retry operation, and it does not model the 36-hour spacing. Recurring retry remains disabled pending the live proof gate below.
 
 ---
 
@@ -527,6 +527,18 @@ The flag may be enabled only after every check below has been completed and reco
 dates, sanitized request and response shapes, and identifiers — never secrets, card numbers, or
 customer contact details.
 
+The opt-in proof suite stays skipped unless every one of these runtime inputs is present:
+
+- `RAZORPAY_KEY_ID` beginning `rzp_test_`;
+- `RAZORPAY_KEY_SECRET`;
+- `RAZORPAY_WEBHOOK_SECRET`;
+- `RAZORPAY_RECURRING_PROOF_PAYMENT_ID`;
+- `RAZORPAY_RECURRING_PROOF_CUSTOMER_ID`;
+- `RAZORPAY_RECURRING_PROOF_ORDER_ID`;
+- `RAZORPAY_RECURRING_PROOF_SUBSCRIPTION_ID`;
+- `RAZORPAY_RECURRING_PROOF_AMOUNT`;
+- `RAZORPAY_RECURRING_PROOF_CURRENCY`.
+
 1. Obtain Razorpay confirmation that recurring card payments are enabled on the Test Mode account.
    **Blocked as of 2026-08-28** — see [Empirical result](#empirical-result-card-mandate-registration-is-refused-on-this-account-2026-08-28)
    above. Standard Checkout itself refuses to offer a payment method for an order requesting
@@ -539,7 +551,8 @@ customer contact details.
 4. Create a subsequent Test Mode payment using the documented recurring API and record its payment id.
 5. Produce or identify a failed subsequent mandate payment, wait the provider-required interval
    where applicable, and pre-register its Recovery Case with the same amount, currency, customer,
-   subscription, and order context.
+   subscription, and order context. Supply those exact provider order and subscription ids to the
+   proof suite rather than generating stand-ins.
 6. Run `tests/razorpay-recurring-proof.test.ts` with that payment id and context. It must submit one
    retry, return a real `pay_...` reference, and resolve a replayed action identity to the same
    payment rather than creating a second one.

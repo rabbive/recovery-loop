@@ -19,6 +19,8 @@ const keySecret = process.env.RAZORPAY_KEY_SECRET ?? '';
 const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET ?? '';
 const paymentId = process.env.RAZORPAY_RECURRING_PROOF_PAYMENT_ID ?? '';
 const customerId = process.env.RAZORPAY_RECURRING_PROOF_CUSTOMER_ID ?? '';
+const orderId = process.env.RAZORPAY_RECURRING_PROOF_ORDER_ID ?? '';
+const subscriptionId = process.env.RAZORPAY_RECURRING_PROOF_SUBSCRIPTION_ID ?? '';
 const amount = Number(process.env.RAZORPAY_RECURRING_PROOF_AMOUNT ?? '');
 const currency = process.env.RAZORPAY_RECURRING_PROOF_CURRENCY ?? '';
 const configured = keyId.startsWith('rzp_test_')
@@ -26,13 +28,15 @@ const configured = keyId.startsWith('rzp_test_')
   && webhookSecret.length > 0
   && paymentId.length > 0
   && customerId.length > 0
+  && orderId.length > 0
+  && subscriptionId.length > 0
   && Number.isSafeInteger(amount) && amount > 0
   && /^[A-Z]{3}$/.test(currency);
 
 function mandateCase(id: string): RecoveryCase {
   const at = new Date().toISOString();
   return addAttempt(
-    createRecoveryCase(id, { customerId, subscriptionId: `${id}-subscription`, orderId: `${id}-order`, amount, currency, dueAt: at }, at),
+    createRecoveryCase(id, { customerId, subscriptionId, orderId, amount, currency, dueAt: at }, at),
     { id: `${id}:attempt:1`, providerPaymentId: paymentId, method: 'recurring_mandate', status: 'failed', occurredAt: at },
   );
 }

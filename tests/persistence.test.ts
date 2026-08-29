@@ -38,6 +38,9 @@ describe('connection encryption', () => {
     expect(sslOf('postgres://postgres@127.0.0.1:5432/recovery_loop_test')).toBe(false);
     expect(sslOf('postgres://postgres:postgres@localhost:5432/recovery_loop_test')).toBe(false);
     expect(sslOf('postgresql:///recovery_loop_test')).toBe(false);
+    expect(sslOf('postgresql:///recovery_loop_test?host=/var/run/postgresql')).toBe(false);
+    expect(sslOf('postgresql:///recovery_loop_test?host=::1')).toBe(false);
+    expect(sslOf('postgresql:///recovery_loop_test?host=managed.example.com')).toEqual({ rejectUnauthorized: false });
   });
 });
 

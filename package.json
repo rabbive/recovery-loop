@@ -15,7 +15,7 @@
     "test:postgres": "vitest run tests/persistence.test.ts tests/postgres-concurrency.test.ts"
   },
   "engines": {
-    "node": "22.x"
+    "node": ">=22.12.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

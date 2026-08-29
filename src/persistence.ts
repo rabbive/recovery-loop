@@ -170,7 +170,9 @@ export class PostgresEvaluationRunStore implements EvaluationRunStore {
  * encryption in transit, not proof of who is on the other end.
  */
 function sslFor(connectionString: string): PoolConfig['ssl'] {
-  const local = /^postgres(?:ql)?:\/\/\//.test(connectionString) || /@(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(connectionString);
+  const url = new URL(connectionString);
+  const host = url.searchParams.get('host') ?? url.hostname;
+  const local = host === '' || host.startsWith('/') || ['localhost', '127.0.0.1', '::1', '[::1]'].includes(host.toLowerCase());
   return local ? false : { rejectUnauthorized: false };
 }
 

@@ -23,6 +23,17 @@ function action(kind: RecoveryAction['kind'], caseId = 'case-1'): RecoveryAction
 
 interface Recorded { readonly method: string; readonly url: string; readonly body: Record<string, unknown> }
 
+const originalPayment = {
+  id: 'pay_original', order_id: 'order-1', amount: 4999, currency: 'INR', recurring: true,
+  token_id: 'token_1', customer_id: 'customer-1', email: 'renewal@example.com',
+  contact: '+919900000000', method: 'card', notes: { caseId: 'case-1', subscriptionId: 'subscription-1' },
+};
+
+const validActionOrder = {
+  id: 'order_retry_existing', receipt: 'case-1:retry', amount: 4999, currency: 'INR',
+  notes: { caseId: 'case-1', subscriptionId: 'subscription-1', recoveryActionKey: 'case-1:retry' },
+};
+
 /** A stateful Test Mode double for the provider objects a recurring retry reads and creates. */
 function razorpay(overrides: {
   payment?: Record<string, unknown> | null;
@@ -39,16 +50,15 @@ function razorpay(overrides: {
   const orderPayments = new Map<string, Array<{ id: string; status: string }>>();
   let issued = 0;
   const payment = overrides.payment === undefined
-    ? { id: 'pay_original', order_id: 'order-1', recurring: true, token_id: 'token_1', customer_id: 'customer-1', email: 'renewal@example.com', contact: '+919900000000', method: 'card', notes: { caseId: 'case-1', subscriptionId: 'subscription-1' } }
-    : overrides.payment;
+    ? originalPayment
+    : overrides.payment === null
+      ? null
+      : { amount: originalPayment.amount, currency: originalPayment.currency, ...overrides.payment };
   const originalOrder = overrides.originalOrder === undefined
     ? { id: 'order-1', amount: 4999, currency: 'INR', notes: { caseId: 'case-1', subscriptionId: 'subscription-1' } }
     : overrides.originalOrder;
   if (overrides.existingActionPaymentStatus !== undefined) {
-    ordersByReceipt.set('case-1:retry', {
-      id: 'order_retry_existing', receipt: 'case-1:retry', amount: 4999, currency: 'INR',
-      notes: { caseId: 'case-1', subscriptionId: 'subscription-1', recoveryActionKey: 'case-1:retry' },
-    });
+    ordersByReceipt.set('case-1:retry', validActionOrder);
     orderPayments.set('order_retry_existing', [{ id: 'pay_retry_existing', status: overrides.existingActionPaymentStatus }]);
   }
   const fetcher = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -176,6 +186,32 @@ describe('Razorpay Test Mode recurring retry', () => {
     const result = await provider.submitRetry(mandateCase(), action('retry'));
     expect(result.idempotent).toBe(true);
     expect(result.providerReference).toBe('pay_retry_existing');
+    expect(requests.some((request) => request.method === 'POST')).toBe(false);
+  });
+
+  it.each([
+    ['amount', { ...originalPayment, amount: 5000 }],
+    ['currency', { ...originalPayment, currency: 'USD' }],
+  ])('refuses before any POST when the provider %s differs from the registered case', async (_label, payment) => {
+    const { requests, provider } = razorpay({ payment });
+    const result = await provider.submitRetry(mandateCase(), action('retry'));
+    expect(result.status).toBe('failed');
+    expect(result.message).toMatch(/identity/i);
+    expect(requests.some((request) => request.method === 'POST')).toBe(false);
+  });
+
+  it.each([
+    ['receipt', { ...validActionOrder, receipt: 'case-other:retry' }],
+    ['case note', { ...validActionOrder, notes: { ...validActionOrder.notes, caseId: 'case-other' } }],
+    ['subscription note', { ...validActionOrder, notes: { ...validActionOrder.notes, subscriptionId: 'subscription-other' } }],
+    ['action note', { ...validActionOrder, notes: { ...validActionOrder.notes, recoveryActionKey: 'case-other:retry' } }],
+    ['amount', { ...validActionOrder, amount: 5000 }],
+    ['currency', { ...validActionOrder, currency: 'USD' }],
+  ])('refuses an action-order lookup with the wrong %s before reading payments or charging', async (_label, returnedOrder) => {
+    const { requests, provider } = razorpay({ orderLookupPayload: { items: [returnedOrder] } });
+    const result = await provider.submitRetry(mandateCase(), action('retry'));
+    expect(result.status).toBe('failed');
+    expect(requests.some((request) => request.url.endsWith('/v1/orders/order_retry_existing/payments'))).toBe(false);
     expect(requests.some((request) => request.method === 'POST')).toBe(false);
   });
 

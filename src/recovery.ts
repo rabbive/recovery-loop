@@ -33,6 +33,20 @@ export { AnthropicDiagnosisEngine, DiagnosisUnavailableError, FixtureDiagnosisEn
 /** The version stamped on every policy decision. Reported with evaluation results so a batch is reproducible. */
 export const POLICY_VERSION = 'policy-v1';
 
+/** A caller tried to reuse a Recovery Case id for a different immutable renewal context. */
+export class RecoveryCaseConflictError extends Error {
+  constructor(readonly caseId: string) {
+    super(`Recovery Case ${caseId} is already registered with a different immutable context`);
+    this.name = 'RecoveryCaseConflictError';
+  }
+}
+
+export interface ExpiryResult {
+  readonly recoveryCase: RecoveryCase;
+  /** Whether this invocation, while holding the case lock, transitioned the case to exhausted. */
+  readonly expired: boolean;
+}
+
 export interface Policy {
   decide(recoveryCase: RecoveryCase, diagnosis: Diagnosis, now: string): PolicyDecision;
 }
@@ -165,13 +179,24 @@ export class RecoveryWorkflow {
   }
 
   async openCase(id: string, context: RenewalContext): Promise<RecoveryCase> {
+    return (await this.openCaseWithOutcome(id, context)).recoveryCase;
+  }
+
+  /** Registers a case under its lock and preserves whether this invocation created it. */
+  async openCaseWithOutcome(id: string, context: RenewalContext): Promise<{ recoveryCase: RecoveryCase; registered: boolean }> {
     return this.store.withCaseLock(id, async (transaction) => {
+      const existing = await transaction.get();
+      if (existing) {
+        const sameContext = (Object.keys(context) as (keyof RenewalContext)[]).every((key) => existing.context[key] === context[key]);
+        if (!sameContext) throw new RecoveryCaseConflictError(id);
+        return { recoveryCase: existing, registered: false };
+      }
       const now = this.clock.now().toISOString();
       const recoveryCase = appendAudit(createRecoveryCase(id, context, now), {
         type: 'case_opened', actor: 'system', at: now, explanation: 'Recovery Case opened for a failed renewal', data: { orderId: context.orderId },
       });
       await transaction.save(recoveryCase);
-      return recoveryCase;
+      return { recoveryCase, registered: true };
     });
   }
 
@@ -238,17 +263,21 @@ export class RecoveryWorkflow {
   }
 
   async expireLapsedFallbackLink(caseId: string): Promise<RecoveryCase> {
+    return (await this.expireLapsedFallbackLinkWithOutcome(caseId)).recoveryCase;
+  }
+
+  async expireLapsedFallbackLinkWithOutcome(caseId: string): Promise<ExpiryResult> {
     return this.store.withCaseLock(caseId, async (transaction) => {
       const current = await this.requireCase(transaction, caseId);
-      if (isTerminal(current.status)) return current;
+      if (isTerminal(current.status)) return { recoveryCase: current, expired: false };
       const now = this.clock.now().toISOString();
       const lapsed = current.actions.find((action) => action.kind === 'fallback_link' && action.status !== 'failed' && action.expiresAt !== undefined && Date.parse(action.expiresAt) <= Date.parse(now));
-      if (!lapsed) return current;
+      if (!lapsed) return { recoveryCase: current, expired: false };
       let updated = updateAction(current, lapsed.idempotencyKey, { status: 'failed', result: 'Fallback link expired before the renewal was paid' }, now);
       updated = appendAudit(updated, { type: 'fallback_link_expired', actor: 'system', at: now, explanation: 'The fallback link expired before the renewal was paid', data: { action: lapsed.kind, expiresAt: lapsed.expiresAt } });
       updated = this.settle(updated, 'exhausted', now, 'The fallback link expired before the renewal was paid');
       await transaction.save(updated);
-      return updated;
+      return { recoveryCase: updated, expired: true };
     });
   }
 

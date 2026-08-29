@@ -3,6 +3,7 @@ import type { RecoveryApplication } from './application.js';
 import type { NormalizedEventInput } from './provider.js';
 import { caseStatuses, isTerminal, renewalContextViolation, type CaseStatus, type RecoveryCase, type RenewalContext } from './domain.js';
 import { authorizedControlRequest } from './auth.js';
+import { RecoveryCaseConflictError } from './recovery.js';
 import { WebhookIngress, WebhookRejection } from './webhook.js';
 import { fallbackRecoveryMessage } from './messaging.js';
 import { publishSeededBatch } from './evaluation.js';
@@ -314,15 +315,15 @@ export function createRequestListener(application: RecoveryApplication): (reques
     };
     const violation = renewalContextViolation(context);
     if (violation) return send(response, 400, JSON.stringify({ error: violation }));
-    const existing = await store.get(id);
-    if (existing) {
-      const same = (Object.keys(context) as (keyof RenewalContext)[]).every((key) => existing.context[key] === context[key]);
-      return same
-        ? send(response, 200, JSON.stringify({ caseId: existing.id, status: existing.status, registered: false }))
-        : send(response, 409, JSON.stringify({ error: `Recovery Case ${id} is already registered with a different renewal` }));
+    try {
+      const opened = await workflow.openCaseWithOutcome(id, context);
+      return send(response, opened.registered ? 201 : 200, JSON.stringify({ caseId: opened.recoveryCase.id, status: opened.recoveryCase.status, registered: opened.registered }));
+    } catch (error) {
+      if (error instanceof RecoveryCaseConflictError) {
+        return send(response, 409, JSON.stringify({ error: error.message }));
+      }
+      throw error;
     }
-    const opened = await workflow.openCase(id, context);
-    return send(response, 201, JSON.stringify({ caseId: opened.id, status: opened.status, registered: true }));
   }
 
   /** Applies an operator verdict to one case, or reports that the case does not exist. */

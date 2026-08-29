@@ -39,9 +39,9 @@ export class ExpirySweeper {
     const expiredCaseIds: string[] = [];
     for (const caseId of inspecting) {
       // The workflow takes the case lock and rechecks: a case that was paid or settled between the
-      // query and here is no longer due, and must not be reported as one this sweep exhausted.
-      const swept = await this.workflow.expireLapsedFallbackLink(caseId);
-      if (swept.status === 'exhausted') expiredCaseIds.push(caseId);
+      // query and here is no longer due, and must not be reported as one this sweep expired.
+      const swept = await this.workflow.expireLapsedFallbackLinkWithOutcome(caseId);
+      if (swept.expired) expiredCaseIds.push(caseId);
     }
     return { inspected: inspecting.length, expiredCaseIds, moreDue: due.length > limit };
   }

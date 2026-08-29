@@ -71,6 +71,17 @@ async function advance(workflow: RecoveryWorkflow, diagnose = false): Promise<Re
 }
 
 describe('recovery orchestration', () => {
+  it('keeps the first context when concurrent registrations conflict', async () => {
+    const { workflow, store } = setup();
+
+    const first = workflow.openCase('case-1', context);
+    const conflicting = workflow.openCase('case-1', { ...context, amount: 9999 });
+
+    await expect(first).resolves.toMatchObject({ context });
+    await expect(conflicting).rejects.toThrow(/immutable context/i);
+    expect((await store.get('case-1'))?.context).toEqual(context);
+  });
+
   it('walks a case from failure to recovery through exactly one retry', async () => {
     const { workflow, provider } = setup();
     await openFailedCase(workflow, provider);

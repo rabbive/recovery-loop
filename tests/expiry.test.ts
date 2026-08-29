@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ExpirySweeper, startExpiryScheduler, type ExpirySweepResult } from '../src/expiry.js';
 import { FixedClock } from '../src/provider.js';
-import { InMemoryRecoveryStore, type RecoveryStore, type RecoveryWorkflow } from '../src/recovery.js';
+import { InMemoryRecoveryStore, type ExpiryResult, type RecoveryStore, type RecoveryWorkflow } from '../src/recovery.js';
 import { addAction, appendAudit, createRecoveryCase, updateAction, withStatus, type RecoveryCase } from '../src/domain.js';
 
 const START = '2026-01-01T00:00:00.000Z';
@@ -21,16 +21,16 @@ function lapsedCase(id: string): RecoveryCase {
  */
 function workflowDouble(store: InMemoryRecoveryStore): RecoveryWorkflow {
   return {
-    async expireLapsedFallbackLink(caseId: string): Promise<RecoveryCase> {
+    async expireLapsedFallbackLinkWithOutcome(caseId: string): Promise<ExpiryResult> {
       return store.withCaseLock(caseId, async (transaction) => {
         const current = await transaction.get();
         if (!current) throw new Error(`Recovery Case not found: ${caseId}`);
         const lapsed = current.actions.find((action) => action.kind === 'fallback_link' && action.status !== 'failed');
-        if (!lapsed) return current;
+        if (!lapsed) return { recoveryCase: current, expired: false };
         const failed = updateAction(current, lapsed.idempotencyKey, { status: 'failed' }, AFTER_EXPIRY);
         const exhausted = withStatus(appendAudit(failed, { type: 'fallback_link_expired', actor: 'system', at: AFTER_EXPIRY, explanation: 'expired', data: {} }), 'exhausted', AFTER_EXPIRY, 'exhausted');
         await transaction.save(exhausted);
-        return exhausted;
+        return { recoveryCase: exhausted, expired: true };
       });
     },
   } as unknown as RecoveryWorkflow;
@@ -73,12 +73,17 @@ describe('bounded expiry sweep', () => {
     await expect(sweeper.sweep(1000)).rejects.toThrow(/between 1 and 100/);
   });
 
-  it('reports only the cases this sweep actually exhausted', async () => {
+  it('reports only the cases this sweep actually expired', async () => {
     // A case that settled between the query and the lock is not one the sweep may claim.
     const store = new InMemoryRecoveryStore();
     await store.save(lapsedCase('case-1'));
     const finder: RecoveryStore = { ...store, findLapsedFallbackCaseIds: async () => ['case-1'], get: (id) => store.get(id), all: () => store.all(), save: (value) => store.save(value), withCaseLock: (id, operation) => store.withCaseLock(id, operation), healthCheck: () => store.healthCheck() };
-    const settled = { async expireLapsedFallbackLink(): Promise<RecoveryCase> { return { ...lapsedCase('case-1'), status: 'recovered' }; } } as unknown as RecoveryWorkflow;
+    const settled = {
+      async expireLapsedFallbackLinkWithOutcome(): Promise<ExpiryResult> {
+        // Another transaction exhausted this case after the due-list query but before this lock.
+        return { recoveryCase: { ...lapsedCase('case-1'), status: 'exhausted' }, expired: false };
+      },
+    } as unknown as RecoveryWorkflow;
 
     const result = await new ExpirySweeper(finder, settled, new FixedClock(AFTER_EXPIRY)).sweep();
 

@@ -37,7 +37,7 @@ function webhookInput(payload: Record<string, unknown>, fallbackId?: string): No
   // the only place the delivery names the action that offered it.
   const paymentLink = objectValue(objectValue(nestedPayload.payment_link).entity);
   const paymentLinkNotes = objectValue(paymentLink.notes);
-  const caseId = stringValue(payload.caseId) ?? stringValue(metadata.caseId) ?? stringValue(notes.caseId);
+  const caseId = stringValue(payload.caseId) ?? stringValue(metadata.caseId) ?? stringValue(notes.caseId) ?? stringValue(paymentLinkNotes.caseId);
   const id = stringValue(payload.id) ?? stringValue(payload.eventId) ?? fallbackId ?? stringValue(entity.id);
   const occurredAt = stringValue(payload.occurredAt) ?? stringValue(payload.createdAt) ?? new Date().toISOString();
   const rawType = stringValue(payload.type) ?? stringValue(payload.event);

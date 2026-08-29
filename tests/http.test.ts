@@ -165,15 +165,31 @@ describe('webhook boundary', () => {
     expect(await store.all()).toHaveLength(0);
   });
 
-  it('registers a renewal once, tolerates the same registration again, and refuses a different one', async () => {
-    expect((await register()).status).toBe(201);
+  it('registers a renewal once, tolerates the same registration again, and atomically refuses a conflicting one', async () => {
+    // Hold both old HTTP preflight reads open. They must both observe no case before either can
+    // enter the workflow; only the transaction-aware workflow may make the final decision.
+    const originalGet = store.get.bind(store);
+    let preflights = 0;
+    let releaseSecondPreflight!: () => void;
+    const secondPreflight = new Promise<void>((resolve) => { releaseSecondPreflight = resolve; });
+    store.get = async (id: string) => {
+      if (id !== 'case-1' || preflights >= 2) return originalGet(id);
+      preflights += 1;
+      if (preflights === 1) await secondPreflight;
+      else releaseSecondPreflight();
+      return originalGet(id);
+    };
+
+    const [created, conflicting] = await Promise.all([
+      register(),
+      register('case-1', { ...context, amount: 9999 }),
+    ]);
+
+    store.get = originalGet;
+    expect([created.status, conflicting.status].sort()).toEqual([201, 409]);
     const again = await register();
     expect(again.status).toBe(200);
     expect(await again.json()).toMatchObject({ registered: false });
-
-    const conflicting = await register('case-1', { ...context, amount: 9999 });
-
-    expect(conflicting.status).toBe(409);
     expect((await store.get('case-1'))?.context.amount).toBe(1200);
   });
 
@@ -474,7 +490,6 @@ describe('dashboard demo path', () => {
     await post({
       id: 'event-2',
       type: 'payment.captured',
-      caseId: 'case-1',
       occurredAt: '2026-01-01T00:05:00.000Z',
       payload: {
         payment: { entity: { id: 'pay_customer_paid', notes: { recoveryActionKey: 'case-1:retry' } } },

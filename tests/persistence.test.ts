@@ -37,6 +37,7 @@ describe('connection encryption', () => {
     expect(sslOf('postgres://user:pw@ec2-1-2-3-4.compute.amazonaws.com:5432/dbname')).toEqual({ rejectUnauthorized: false });
     expect(sslOf('postgres://postgres@127.0.0.1:5432/recovery_loop_test')).toBe(false);
     expect(sslOf('postgres://postgres:postgres@localhost:5432/recovery_loop_test')).toBe(false);
+    expect(sslOf('postgresql:///recovery_loop_test')).toBe(false);
   });
 });
 

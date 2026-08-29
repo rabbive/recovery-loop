@@ -211,9 +211,6 @@ const RECURRING_RETRY_DISABLED = 'Razorpay recurring retry is unverified and dis
 /** Razorpay rejects a receipt or reference longer than this, so long action identities are folded. */
 const REFERENCE_MAX_LENGTH = 40;
 
-/** Razorpay payment states that mean money moved. `created` and `failed` did not charge anything. */
-const LIVE_PAYMENT_STATUSES = ['authorized', 'captured', 'refunded'];
-
 interface RazorpayResponse {
   readonly ok: boolean;
   readonly status: number;
@@ -272,12 +269,9 @@ export class RazorpayTestModeProvider implements PaymentProvider {
   }
 
   /**
-   * Charges the mandate behind the failed renewal again: read the original payment, refuse unless it
-   * carries a recurring token, then charge against that **same** order — Razorpay's own retry
-   * semantics describe re-initiating "for the same order id", not creating a new one per attempt.
-   * A live payment already sitting on that order (necessarily a later, successful one: the original
-   * itself is `failed` and never counts) means an earlier call already collected the renewal, so
-   * this replays that reference instead of charging a second time.
+   * Charges the mandate behind the failed renewal against an order owned by this recovery action.
+   * The order receipt is the action identity. A replay finds that order and returns any payment
+   * already attached to it, including `created` or `failed`, instead of issuing another debit.
    */
   async submitRetry(recoveryCase: RecoveryCase, action: RecoveryAction): Promise<ProviderResult> {
     // Guarded here as well as in eligibility. A caller that skipped the question would otherwise
@@ -293,12 +287,39 @@ export class RazorpayTestModeProvider implements PaymentProvider {
     if (!original.ok) return { status: 'failed', message: `Razorpay could not read the original payment ${attempt.providerPaymentId}: HTTP ${original.status}: ${this.describe(original)}` };
     const mandate = this.mandateOf(original.payload);
     if (mandate === undefined) return { status: 'failed', message: `Razorpay payment ${attempt.providerPaymentId} carries no authorized recurring mandate token, so it cannot be charged again` };
-    const orderId = typeof original.payload.order_id === 'string' ? original.payload.order_id : undefined;
-    if (orderId === undefined) return { status: 'failed', message: `Razorpay payment ${attempt.providerPaymentId} carries no order id, so no retry order is known to charge against` };
+    const originalOrderId = typeof original.payload.order_id === 'string' ? original.payload.order_id : undefined;
+    if (originalOrderId === undefined) return { status: 'failed', message: `Razorpay payment ${attempt.providerPaymentId} carries no order id, so its registered renewal identity cannot be checked` };
+    const identityRefusal = await this.originalIdentityRefusal(recoveryCase, original.payload, originalOrderId, mandate);
+    if (identityRefusal !== undefined) return { status: 'failed', message: identityRefusal };
 
-    const charged = await this.findPaymentOfOrder(orderId);
-    if (charged !== undefined) return { status: 'submitted', providerReference: charged, message: 'Razorpay already holds a recurring charge for this order', idempotent: true };
-    return this.chargeMandate(recoveryCase, orderId, mandate);
+    const receipt = this.reference(action.idempotencyKey);
+    const lookedUp = await this.findOrderByReceipt(receipt);
+    if (!lookedUp.response.ok) return { status: 'failed', message: `Razorpay could not look up the retry order for this action identity: HTTP ${lookedUp.response.status}: ${this.describe(lookedUp.response)}` };
+    if (lookedUp.malformed) return { status: 'failed', message: 'Razorpay returned a malformed retry-order lookup, so no charge was attempted' };
+    let orderId = lookedUp.orderId;
+    if (orderId === undefined) {
+      const created = await this.createRetryOrder(recoveryCase, action, receipt);
+      if (created.ok) {
+        orderId = typeof created.payload.id === 'string' ? created.payload.id : undefined;
+        if (orderId === undefined) return { status: 'failed', message: 'Razorpay returned a retry order without an id' };
+      } else if (created.status === 400 && /already exists|duplicate/i.test(this.describe(created))) {
+        const replayedLookup = await this.findOrderByReceipt(receipt);
+        if (!replayedLookup.response.ok) return { status: 'failed', message: `Razorpay rejected a duplicate retry order and its action identity could not be resolved: HTTP ${replayedLookup.response.status}: ${this.describe(replayedLookup.response)}` };
+        if (replayedLookup.malformed) return { status: 'failed', message: 'Razorpay rejected a duplicate retry order and returned a malformed action lookup' };
+        orderId = replayedLookup.orderId;
+        if (orderId === undefined) return { status: 'failed', message: 'Razorpay rejected a duplicate retry order, but no order exists for this action identity' };
+      } else {
+        return { status: 'failed', message: `Razorpay retry-order request returned HTTP ${created.status}: ${this.describe(created)}` };
+      }
+    }
+
+    const payments = await this.paymentsOfOrder(orderId);
+    if (!payments.ok) return { status: 'failed', message: `Razorpay could not check the retry order for an existing payment: HTTP ${payments.status}: ${this.describe(payments)}` };
+    if (!Array.isArray(payments.payload.items)) return { status: 'failed', message: 'Razorpay returned a malformed retry-order payment lookup, so no charge was attempted' };
+    const replayedPayment = this.firstId(payments.payload.items);
+    if (payments.payload.items.length > 0 && replayedPayment === undefined) return { status: 'failed', message: 'Razorpay returned a retry-order payment without an id, so no charge was attempted' };
+    if (replayedPayment !== undefined) return { status: 'submitted', providerReference: replayedPayment, message: 'Razorpay already holds a payment for this recovery action', idempotent: true };
+    return this.chargeMandate(recoveryCase, action, orderId, mandate);
   }
 
   async createFallbackLink(recoveryCase: RecoveryCase, action: RecoveryAction): Promise<FallbackLinkResult> {
@@ -334,7 +355,7 @@ export class RazorpayTestModeProvider implements PaymentProvider {
   }
 
   /** Submits the recurring charge itself. Its outcome arrives by webhook, not in this response. */
-  private async chargeMandate(recoveryCase: RecoveryCase, orderId: string, mandate: MandateIdentity): Promise<ProviderResult> {
+  private async chargeMandate(recoveryCase: RecoveryCase, action: RecoveryAction, orderId: string, mandate: MandateIdentity): Promise<ProviderResult> {
     const charge = await this.call('POST', '/v1/payments/create/recurring', {
       email: mandate.email,
       contact: mandate.contact,
@@ -345,6 +366,7 @@ export class RazorpayTestModeProvider implements PaymentProvider {
       token: mandate.tokenId,
       recurring: true,
       description: `Renewal recovery for order ${recoveryCase.context.orderId}`,
+      notes: this.actionNotes(recoveryCase, action),
     });
     if (!charge.ok) return { status: 'failed', message: `Razorpay recurring charge returned HTTP ${charge.status}: ${this.describe(charge)}` };
     const paymentId = charge.payload.razorpay_payment_id;
@@ -354,20 +376,59 @@ export class RazorpayTestModeProvider implements PaymentProvider {
       : { status: 'failed', message: 'Razorpay accepted the recurring charge without returning a payment id' };
   }
 
-  /**
-   * The live charge already collected against this order, if there is one. Razorpay lists failed and
-   * created payments here too, and neither is a charge: replaying one would strand the action on a
-   * result whose webhook has already fired, so only a payment that took the money counts.
-   */
-  private async findPaymentOfOrder(orderId: string): Promise<string | undefined> {
-    const response = await this.call('GET', `/v1/orders/${encodeURIComponent(orderId)}/payments`);
-    if (!response.ok || !Array.isArray(response.payload.items)) return undefined;
-    const live = response.payload.items.find((item): item is { id: string; status: string } => {
-      if (typeof item !== 'object' || item === null) return false;
-      const candidate = item as { id?: unknown; status?: unknown };
-      return typeof candidate.id === 'string' && typeof candidate.status === 'string' && LIVE_PAYMENT_STATUSES.includes(candidate.status);
+  /** Creates the fresh provider order that belongs to one recovery action. */
+  private async createRetryOrder(recoveryCase: RecoveryCase, action: RecoveryAction, receipt: string): Promise<RazorpayResponse> {
+    return this.call('POST', '/v1/orders', {
+      amount: recoveryCase.context.amount,
+      currency: recoveryCase.context.currency,
+      receipt,
+      notes: this.actionNotes(recoveryCase, action),
     });
-    return live?.id;
+  }
+
+  /** Finds the order created for an action receipt without hiding lookup failures. */
+  private async findOrderByReceipt(receipt: string): Promise<{ response: RazorpayResponse; orderId?: string; malformed: boolean }> {
+    const response = await this.call('GET', '/v1/orders', undefined, { receipt });
+    if (response.ok && !Array.isArray(response.payload.items)) return { response, malformed: true };
+    const orderId = response.ok ? this.firstId(response.payload.items) : undefined;
+    if (response.ok && Array.isArray(response.payload.items) && response.payload.items.length > 0 && orderId === undefined) return { response, malformed: true };
+    return orderId === undefined ? { response, malformed: false } : { response, orderId, malformed: false };
+  }
+
+  private async paymentsOfOrder(orderId: string): Promise<RazorpayResponse> {
+    return this.call('GET', `/v1/orders/${encodeURIComponent(orderId)}/payments`);
+  }
+
+  /**
+   * Refuses a provider payment that does not belong to the registered renewal. Subscription notes
+   * can be carried by the payment or its original order, so the order is fetched only when needed.
+   */
+  private async originalIdentityRefusal(recoveryCase: RecoveryCase, payment: Record<string, unknown>, orderId: string, mandate: MandateIdentity): Promise<string | undefined> {
+    if (mandate.customerId !== recoveryCase.context.customerId) return 'Razorpay customer identity does not match the registered recovery case';
+    if (orderId !== recoveryCase.context.orderId) return 'Razorpay order identity does not match the registered recovery case';
+    const paymentSubscription = this.note(payment, 'subscriptionId', 'subscription_id');
+    if (paymentSubscription !== undefined) {
+      return paymentSubscription === recoveryCase.context.subscriptionId
+        ? undefined
+        : 'Razorpay payment subscription identity does not match the registered recovery case';
+    }
+    const order = await this.call('GET', `/v1/orders/${encodeURIComponent(orderId)}`);
+    if (!order.ok) return `Razorpay could not verify the original order subscription identity: HTTP ${order.status}: ${this.describe(order)}`;
+    return this.note(order.payload, 'subscriptionId', 'subscription_id') === recoveryCase.context.subscriptionId
+      ? undefined
+      : 'Razorpay order subscription identity does not match the registered recovery case';
+  }
+
+  private actionNotes(recoveryCase: RecoveryCase, action: RecoveryAction): Record<string, string> {
+    return { caseId: recoveryCase.id, subscriptionId: recoveryCase.context.subscriptionId, recoveryActionKey: action.idempotencyKey };
+  }
+
+  private note(entity: Record<string, unknown>, ...keys: string[]): string | undefined {
+    const notes = typeof entity.notes === 'object' && entity.notes !== null && !Array.isArray(entity.notes)
+      ? entity.notes as Record<string, unknown>
+      : {};
+    for (const key of keys) if (typeof notes[key] === 'string') return notes[key] as string;
+    return undefined;
   }
 
   private async findLinkByReference(reference: string): Promise<string | undefined> {

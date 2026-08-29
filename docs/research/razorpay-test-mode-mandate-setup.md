@@ -6,7 +6,7 @@ Accessed 26 August 2026 (UTC). Primary sources only: pages under `razorpay.com/d
 
 Several Razorpay docs pages render their tables client-side, so the plain-text conversion of some pages omits table rows. Where that happened the page's own embedded content payload was read directly from the same URL, so the quoted rows are still that page's content — but if a table below looks stale, re-open the cited URL in a browser and re-check.
 
-**Why this document exists.** `src/provider.ts` (`RazorpayTestModeProvider`) can only act on a case whose latest recurring-mandate attempt is `failed` and carries a `providerPaymentId` — see `chargeableMandateAttempt` at `src/provider.ts:65`. It then reads that payment with `GET /v1/payments/:id` and requires `recurring === true` plus `token_id`, `customer_id`, `email`, and `contact` (`src/provider.ts:339-346`). So we need two things from Test Mode: an authorized token, and a **failed** payment on that token. The second is the hard part, and the docs are largely silent on it. See [Riskiest unknown](#riskiest-unknown).
+**Why this document exists.** `src/provider.ts` (`RazorpayTestModeProvider`) can only act on a case whose latest recurring-mandate attempt is `failed` and carries a `providerPaymentId`; `chargeableMandateAttempt` owns that rule. It then reads that payment with `GET /v1/payments/:id` and requires `token_id`, `customer_id`, `email`, and `contact`. An explicit negative `recurring` flag refuses the charge, but the undocumented absence of that field does not. The payment's customer and original order must match the registered case, and its payment or order notes must name the registered subscription. So we need two things from Test Mode: an authorized token, and a **failed** payment on that token with provider identities that can be checked against the case. The failed payment is the hard part, and the docs are largely silent on it. See [Riskiest unknown](#riskiest-unknown).
 
 ---
 
@@ -227,7 +227,7 @@ For the adapter this matters: these surface at `src/provider.ts:292` as `status:
 
 Source: https://razorpay.com/docs/payments/recurring-payments/cards/faqs/
 
-**Flag against the implementation — resolved 2026-08-28:** the adapter used to create a **new** order per action identity rather than re-initiating against the failed payment's own `order_id`, which Razorpay's FAQ describes retrying "for the same order id". `submitRetry` now reads `order_id` directly off the original failed payment (`GET /v1/payments/:id`) and charges against that order; no order is ever created by a retry. Idempotency no longer depends on a receipt lookup — a live payment already sitting on that order (the original itself is `failed` and is filtered out by `LIVE_PAYMENT_STATUSES`) means an earlier call already collected it, so the retry replays that reference instead. The 36-hour spacing itself is still not modelled anywhere in the adapter; that remains open.
+**Implementation choice, revised 2026-08-29:** this FAQ conflicts with the create-subsequent-payment reference in section 3.2, which says, "You have to create a new order every time you want to charge your customers." The adapter follows that API reference. It verifies that the original failed payment belongs to the registered customer, order, and subscription, then creates a fresh order whose `receipt` is the recovery action identity. A replay looks up that receipt and treats any payment on the action order, including `created` or `failed`, as the same submitted action. This prevents a process-crash replay from issuing a second charge. A duplicate-order response is resolved through the same lookup. The implementation therefore does **not** perform the FAQ's same-order retry operation, and it does not model the 36-hour spacing. Recurring retry remains disabled pending the live proof gate below.
 
 ---
 
@@ -295,7 +295,7 @@ Where `recurring` *is* documented as a real field:
 - **The Checkout options object**, as `recurring: true`. Source: https://razorpay.com/docs/api/payments/recurring-payments/cards/create-authorization-transaction/
 - **The `POST /v1/payments/create/recurring` request body**, as a boolean. Source: https://razorpay.com/docs/api/payments/recurring-payments/cards/create-subsequent-payments/
 
-**Docs do not say** that `recurring` is absent from the payment response — only that it is undocumented. Razorpay's API may well return it (the field is widely used in practice), but this document will not assert that from an unsourced position. Treat it as: **the adapter's `payment.recurring !== true` guard at `src/provider.ts:344` is not backed by any Razorpay documentation, and is the single most likely reason a real Test Mode mandate payment gets rejected as "carries no authorized recurring mandate token".**
+**Docs do not say** that `recurring` is absent from the payment response, only that it is undocumented. Razorpay's API may return it, but this document will not assert that from an unsourced position. The adapter now treats absence as unknown and accepts the documented truthy shapes it may receive; only an explicit negative refuses the charge. `token_id` remains the required mandate proof in the fetched payment.
 
 Recommended follow-up (verification, not doc reading): call `GET /v1/payments/:id` against a real Test Mode recurring payment and inspect the raw JSON. If `recurring` is absent, the documented alternative is to confirm the mandate through the token instead — `GET /v1/customers/:customer_id/tokens` and check `recurring === true` / `recurring_details.status === "confirmed"`, which *is* documented.
 
@@ -337,10 +337,10 @@ Required fields (marked required in the reference): `email` (string), `contact` 
 
 Documented response parameters: `razorpay_payment_id`, `razorpay_order_id`, `razorpay_signature`. Success sample on the cards page shows only `{"razorpay_payment_id": "pay_1Aa00000000001"}`, but the emandate page's Watch Out callout is explicit: "You will receive `razorpay_payment_id`, `razorpay_order_id` and `razorpay_signature` as a response when you create a Recurring Payment in **Test mode**." Source: https://razorpay.com/docs/api/payments/recurring-payments/emandate/create-subsequent-payments/
 
-**Flag against the implementation:**
+**Implementation check:**
 
-- `src/provider.ts:289` sends `recurring: '1'` (string). Both API reference pages type `recurring` as **boolean** and every code sample across all seven SDK languages passes `true`. The string `'1'` is not documented. Razorpay may coerce it; the docs do not say so. Change it to `true` or document why not.
-- The adapter reads only `razorpay_payment_id` (`src/provider.ts:293`), which is fine — it is a documented, required response field.
+- The adapter sends boolean `recurring: true`, matching both API reference pages and their SDK samples.
+- The adapter reads only `razorpay_payment_id`, which is fine because it is a documented, required response field.
 - Emandate caveat the adapter should be aware of: for emandate, "the payment entity returned is in the created state and may take 1 working day for confirmation." Source: https://razorpay.com/docs/payments/recurring-payments/emandate/integrate/ — consistent with the adapter reporting only `submitted`.
 - Optional pre-debit notification: `POST /v1/orders` accepts a `notification` object (`token_id`, `payment_after`). "The TAT to create a debit if you send a pre-debit notification is 36 hours and 5 minutes." Source: https://razorpay.com/docs/api/payments/recurring-payments/cards/create-subsequent-payments/ — the adapter does not send `notification`, which is consistent with the docs treating it as optional, but see the `pre_debit_notification_not_sent` error in §2.5 and the ₹15,000 threshold below.
 
@@ -482,7 +482,7 @@ Candidate approaches, in descending order of plausibility, all requiring empiric
 3. Let the 3-day Test Mode token expiry lapse and then charge — outcome undocumented, and likely also an API error rather than a failed payment.
 4. Synthesise the failed attempt: post a signed `payment.failed` webhook to the local endpoint carrying a `providerPaymentId` that points at a **real** Test Mode payment which itself carries a valid mandate. This is the only path that does not depend on an undocumented Test Mode behaviour, and it is how the repo's existing contract tests already work.
 
-**Secondary risk, coupled to the above:** even with a genuine failed mandate payment in hand, the adapter's `recurring !== true` guard (`src/provider.ts:344`) may reject it, because `recurring` is not a documented field of the `GET /v1/payments/:id` response (§3). Verify the raw JSON of a real Test Mode recurring payment before assuming the retry path is reachable at all.
+**Secondary risk, coupled to the above:** even with a genuine failed mandate payment in hand, its customer, original order, and subscription notes must match the registered Recovery Case before the adapter will create an order. Record the sanitized identity fields from a real Test Mode recurring payment and order so the proof verifies this fail-safe path rather than bypassing it.
 
 ---
 

@@ -34,10 +34,11 @@ describe.skipIf(!configured)('Razorpay Test Mode integration', () => {
     expect(replay.providerReference).toBe(created.providerReference);
   }, 30_000);
 
-  it('reports a missing original payment as a failed retry rather than charging blind', async () => {
+  it('keeps the unproven recurring retry disabled without a network charge', async () => {
     const recoveryCase = renewalCase(`itest-retry-${Date.now()}`);
     const result = await provider.submitRetry(recoveryCase, { id: `${recoveryCase.id}:action:2`, kind: 'retry', status: 'pending', idempotencyKey: `${recoveryCase.id}:retry`, createdAt: recoveryCase.createdAt });
     expect(result.status).toBe('failed');
     expect(result.providerReference).toBeUndefined();
+    expect(result.message).toMatch(/unverified and disabled/i);
   }, 30_000);
 });

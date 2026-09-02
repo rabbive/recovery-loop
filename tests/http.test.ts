@@ -575,6 +575,26 @@ describe('dashboard demo path', () => {
       expect(html).toContain(fragment);
     }
   });
+
+  it('surfaces load and replay failures instead of leaving the panels stuck', async () => {
+    const html = await fetch(origin).then((response) => response.text());
+
+    for (const fragment of ['id="load-error"', 'role="alert"', 'id="retry-load"', 'showLoadError', 'button.disabled=true']) {
+      expect(html).toContain(fragment);
+    }
+    // A status filter that matches nothing is a filter miss, not an invitation to run the
+    // evaluation: there is no run-evaluation control in this page, and the batch already ran.
+    expect(html).toContain('No cases match this status filter.');
+    expect(html).not.toContain('No cases match. Run the evaluation.');
+  });
+
+  it('honors a saved theme, then the system color scheme, when the page first paints', async () => {
+    const html = await fetch(origin).then((response) => response.text());
+
+    for (const fragment of ["localStorage.getItem(themeKey)==='dark'", "matchMedia('(prefers-color-scheme: dark)')"]) {
+      expect(html).toContain(fragment);
+    }
+  });
 });
 
 describe('fallback message preview', () => {

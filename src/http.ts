@@ -24,7 +24,7 @@ function dashboard(): string {
 .app-header{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;border-bottom:1px solid var(--border);padding-bottom:28px}.brand .eyebrow{margin-bottom:9px}.header-actions{display:flex;align-items:center;gap:12px;padding-top:18px}.environment{display:inline-flex;align-items:center;gap:7px;color:var(--muted);font-size:12px;white-space:nowrap}.dot{width:7px;height:7px;border-radius:999px;background:#22c55e;box-shadow:0 0 0 3px #dcfce7}
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;border:1px solid transparent;border-radius:7px;cursor:pointer;font:600 13px/1 Inter,ui-sans-serif,system-ui,sans-serif;padding:9px 13px;transition:background .15s,border-color .15s,box-shadow .15s}.btn:focus-visible,select:focus-visible,.theme-toggle:focus-visible{outline:2px solid var(--ring);outline-offset:2px}.btn-primary{background:var(--primary);color:var(--primary-foreground);box-shadow:0 1px 2px #0f172a1a}.btn-primary:hover{background:var(--primary-hover)}.btn-outline{background:var(--surface);border-color:var(--border-strong);color:var(--foreground)}.btn-outline:hover{background:var(--surface-muted)}.btn-danger{color:var(--danger);border-color:#fecaca}.btn-danger:hover{background:var(--danger-bg)}.button-meta{color:var(--primary-muted);font-size:11px;font-weight:500}:root[data-theme="dark"] .btn-primary .button-meta{color:#334155}.runtime-facts{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:10px}.runtime-facts .fact-label{color:var(--muted);font-size:11px;letter-spacing:.04em;text-transform:uppercase}.runtime-facts span strong{font-size:12px}
 .theme-toggle{align-items:center;background:var(--surface);border:1px solid var(--border-strong);border-radius:7px;color:var(--foreground);cursor:pointer;display:inline-flex;font:600 12px/1 Inter,ui-sans-serif,system-ui,sans-serif;gap:7px;padding:9px 11px;transition:background .15s,border-color .15s}.theme-toggle:hover{background:var(--surface-muted)}.theme-icon{font-size:14px;line-height:1}.theme-label{min-width:30px;text-align:left}
-.toolbar{display:flex;align-items:center;justify-content:space-between;gap:20px;margin:22px 0 30px}.toolbar-copy{display:flex;flex-direction:column;gap:4px;min-width:0}.toolbar-copy .muted{font-size:12px;max-width:920px}.select-field{display:flex;align-items:center;gap:9px;color:var(--muted);font-size:12px;font-weight:600;white-space:nowrap}.select-field select{min-width:150px;border:1px solid var(--border-strong);border-radius:7px;background:var(--surface);color:var(--foreground);font:inherit;padding:8px 30px 8px 10px}
+.toolbar{display:flex;align-items:center;justify-content:space-between;gap:20px;margin:22px 0 30px}.toolbar-copy{display:flex;flex-direction:column;gap:4px;min-width:0}.toolbar-copy .muted{font-size:12px;max-width:920px}.error-banner{background:var(--danger-bg);border:1px solid var(--danger);border-radius:7px;color:var(--danger);display:flex;align-items:center;gap:10px;margin-top:10px;max-width:920px;padding:9px 12px}.error-banner[hidden]{display:none}.error-banner .btn{font-size:12px;padding:6px 10px}.select-field{display:flex;align-items:center;gap:9px;color:var(--muted);font-size:12px;font-weight:600;white-space:nowrap}.select-field select{min-width:150px;border:1px solid var(--border-strong);border-radius:7px;background:var(--surface);color:var(--foreground);font:inherit;padding:8px 30px 8px 10px}
 .section{margin-top:32px}.section-heading{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:12px}.section-heading p{color:var(--muted);font-size:13px;margin:4px 0 0}.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}.metric-card{background:var(--surface);border:1px solid var(--border);border-radius:9px;min-height:106px;padding:16px 17px;box-shadow:0 1px 2px #0f172a08}.metric-card .label{color:var(--muted);font-size:12px;line-height:1.35;max-width:18ch}.metric-card .value{font-size:24px;font-weight:700;letter-spacing:-.035em;line-height:1.1;margin-top:12px}.metric-card .detail{color:var(--subtle);font-size:11px;margin-top:8px}.metric-card.primary{border-color:#cbd5e1;background:linear-gradient(180deg,#fff,#f8fafc)}
 .card,.panel{background:var(--surface);border:1px solid var(--border);border-radius:9px;box-shadow:0 1px 2px #0f172a08}.table-shell{overflow:auto;border:1px solid var(--border);border-radius:9px;background:var(--surface);box-shadow:0 1px 2px #0f172a08}.table-shell table{border:0;border-radius:0}.table-shell.compact{margin-top:14px}.table-shell.compact table{min-width:780px}
 table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:11px 14px;border-bottom:1px solid var(--border);font-size:13px;white-space:nowrap}th{background:var(--surface-muted);color:var(--muted);font-size:11px;font-weight:700;letter-spacing:.045em;text-transform:uppercase}tbody tr:last-child td{border-bottom:0}tr.case:hover{background:#f8fafc}tr.case.selected{background:#f1f5f9}td code,code{background:#f1f5f9;border:1px solid #e2e8f0;border-radius:5px;color:#334155;font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;padding:3px 6px}.case-link{background:transparent;border:0;color:inherit;cursor:pointer;font:inherit;padding:0}.case-link:focus-visible{outline:2px solid var(--ring);outline-offset:3px}.case-id{font-weight:600}.cell-note{color:var(--subtle);display:block;font-size:11px;margin-top:3px}.count{color:var(--muted);font-variant-numeric:tabular-nums}.empty-cell{color:var(--muted);padding:26px 14px;text-align:center}
@@ -37,7 +37,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:11px 14p
  <body><main data-shell>
 <header class="app-header"><div class="brand"><div class="eyebrow">Revenue operations</div><h1>Recovery Loop</h1><p class="lede">AI-assisted recovery for failed SaaS renewals.</p></div>
 <div class="header-actions"><span class="environment" id="runtime"><span class="dot"></span> Reading runtime…</span><button class="theme-toggle" id="theme-toggle" data-theme-toggle type="button" aria-pressed="false" aria-label="Switch to dark mode"><span class="theme-icon" aria-hidden="true">☾</span><span class="theme-label">Dark</span></button></div></header>
-<div class="toolbar"><div class="toolbar-copy"><span class="eyebrow">Workspace snapshot</span><span class="muted" id="batch">Loading live figures…</span><div class="runtime-facts" id="runtime-facts"></div></div><label class="select-field"><span>Status</span>
+<div class="toolbar"><div class="toolbar-copy"><span class="eyebrow">Workspace snapshot</span><span class="muted" id="batch">Loading live figures…</span><div class="runtime-facts" id="runtime-facts"></div><p class="error-banner" id="load-error" role="alert" hidden><span id="load-error-text"></span> <button type="button" class="btn btn-outline" id="retry-load">Retry loading</button></p></div><label class="select-field"><span>Status</span>
 <select id="filter"><option value="">All</option>${caseStatuses.map((status) => `<option value="${status}">${status}</option>`).join('')}</select></label>
  </div>
 <section class="section" aria-labelledby="metrics-heading"><div class="section-heading" data-section-heading><div><h2 id="metrics-heading">At a glance</h2><p>Live projection across every stored recovery case.</p></div></div><div class="metrics" data-card="metric-grid" id="cards"></div></section>
@@ -57,7 +57,11 @@ const badge=(value,tone='neutral')=>'<span class="badge badge-'+tone+'" data-bad
 const statusTone=value=>({recovered:'success',retry_scheduled:'info',fallback_link_available:'info',at_risk:'warning',diagnosed:'warning',escalated:'danger',exhausted:'danger',stopped:'neutral'}[value]||'neutral');
 const statusBadge=value=>badge(value,statusTone(value));
 let selected=null;
-const get=path=>fetch(path).then(r=>r.json());
+const get=async path=>{
+  const response=await fetch(path);
+  if(!response.ok)throw new Error('HTTP '+response.status+' for '+path);
+  return response.json();
+};
 const themeKey='recovery-loop-theme';
 const themeToggle=document.querySelector('#theme-toggle');
 const applyTheme=theme=>{
@@ -73,6 +77,7 @@ const applyTheme=theme=>{
 };
 let savedTheme='light';
 try{savedTheme=localStorage.getItem(themeKey)==='dark'?'dark':'light'}catch(e){}
+if(savedTheme==='light'&&window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)savedTheme='dark';
 applyTheme(savedTheme);
 if(themeToggle)themeToggle.onclick=()=>{
   const next=document.documentElement.dataset.theme==='dark'?'light':'dark';
@@ -91,7 +96,8 @@ function renderMetrics(m){
 
 function renderCases(cases){
   const table=document.querySelector('#cases');
-  table.innerHTML=cases.map(c=>'<tr class="case'+(c.id===selected?' selected':'')+'"><td><button type="button" class="case-link" data-id="'+esc(c.id)+'" aria-label="Open recovery case '+esc(c.id)+'"><span class="case-id"><code>'+esc(c.id)+'</code></span></button></td><td>'+esc(c.customerId)+'</td><td>'+statusBadge(c.status)+'</td><td>'+esc(label(c.failureCategory))+'</td><td>'+money(c.amount,c.currency)+'</td><td>'+money(c.recoveredAmount,c.currency)+'</td><td class="count">'+(c.actions||'—')+'</td><td class="count">'+(c.audit||'—')+'</td><td class="muted">'+esc(c.updatedAt)+'</td></tr>').join('')||'<tr><td class="empty-cell" colspan="9">No cases match. Run the evaluation.</td></tr>';
+  const emptyCell=document.querySelector('#filter').value?'No cases match this status filter.':'No recovery cases have been recorded yet.';
+  table.innerHTML=cases.map(c=>'<tr class="case'+(c.id===selected?' selected':'')+'"><td><button type="button" class="case-link" data-id="'+esc(c.id)+'" aria-label="Open recovery case '+esc(c.id)+'"><span class="case-id"><code>'+esc(c.id)+'</code></span></button></td><td>'+esc(c.customerId)+'</td><td>'+statusBadge(c.status)+'</td><td>'+esc(label(c.failureCategory))+'</td><td>'+money(c.amount,c.currency)+'</td><td>'+money(c.recoveredAmount,c.currency)+'</td><td class="count">'+(c.actions||'—')+'</td><td class="count">'+(c.audit||'—')+'</td><td class="muted">'+esc(c.updatedAt)+'</td></tr>').join('')||'<tr><td class="empty-cell" colspan="9">'+emptyCell+'</td></tr>';
   table.querySelectorAll('button.case-link').forEach(button=>{button.onclick=()=>openCase(button.dataset.id)});
 }
 
@@ -108,7 +114,16 @@ function renderDetail(c){
     '<section class="detail-block full"><div class="block-heading"><h3>Audit timeline</h3><span class="block-label">'+c.audit.length+' entries</span></div><ul class="timeline">'+c.audit.map(e=>'<li><code>'+esc(e.at)+'</code><strong>'+esc(label(e.type))+'</strong><span class="muted">('+esc(e.actor)+')</span><span>'+esc(e.explanation)+'</span>'+(Object.keys(e.data).length?'<span class="audit-data">'+esc(JSON.stringify(e.data))+'</span>':'')+'</li>').join('')+'</ul></section></div>';
 }
 
-async function openCase(id){selected=id;const c=await get('/api/cases/'+encodeURIComponent(id));renderDetail(c);renderCases(await get(listUrl()))}
+async function openCase(id){
+  selected=id;
+  try{
+    const detail=await get('/api/cases/'+encodeURIComponent(id));
+    renderDetail(detail);
+    renderCases(await get(listUrl()));
+  }catch(error){
+    document.querySelector('#detail').innerHTML='<div class="empty-state"><span class="badge badge-danger" data-badge="status">Could not open case</span><p style="margin:10px 0 0" class="muted">'+esc(error instanceof Error?error.message:String(error))+'</p></div>';
+  }
+}
 const listUrl=()=>{const status=document.querySelector('#filter').value;return '/api/cases'+(status?'?status='+encodeURIComponent(status):'')};
 function renderEvaluation(batch){
   const panel=document.querySelector('#evaluation');
@@ -127,23 +142,54 @@ function renderRuntime(r){
     [['Payments',r.payments],['Live diagnosis',r.liveDiagnosis],['Seeded evaluation',r.seededEvaluation],['Persistence',r.persistence],['Recurring retry',r.recurringRetry]]
       .map(([k,v])=>'<span><span class="fact-label">'+esc(k)+'</span> <strong>'+esc(v)+'</strong></span>').join('');
 }
-async function refresh(){const [m,c,b,r]=await Promise.all([get('/api/metrics'),get(listUrl()),get('/api/evaluation'),get('/api/runtime')]);renderMetrics(m);renderCases(c);renderEvaluation(b);renderRuntime(r)}
+function showLoadError(message){
+  document.querySelector('#load-error-text').textContent=message;
+  document.querySelector('#load-error').hidden=false;
+}
+function hideLoadError(){document.querySelector('#load-error').hidden=true}
+async function refresh(){
+  try{
+    const [m,c,b,r]=await Promise.all([get('/api/metrics'),get(listUrl()),get('/api/evaluation'),get('/api/runtime')]);
+    renderMetrics(m);renderCases(c);renderEvaluation(b);renderRuntime(r);
+    hideLoadError();
+  }catch(error){
+    showLoadError(error instanceof Error?error.message:String(error));
+  }
+}
 document.querySelector('#filter').onchange=refresh;
+document.querySelector('#retry-load').onclick=refresh;
 
 // Each scenario replays inside the server against a throwaway application. The browser never sees
 // a signature or a raw body, and nothing it can press writes to the cases listed above.
 async function replay(){
+  const button=document.querySelector('#replay');
   const panel=document.querySelector('#lab');
   const note=document.querySelector('#labnote');
+  button.disabled=true;
   panel.innerHTML='<span class="muted">Delivering…</span>';
   note.textContent='';
-  const scenarios=await get('/api/lab/scenarios');
-  if(!Array.isArray(scenarios)){panel.innerHTML='<span class="muted">The replay lab is unavailable on this instance.</span>';return}
+  let scenarios;
+  try{scenarios=await get('/api/lab/scenarios')}catch(error){
+    panel.innerHTML='<span class="muted">The replay lab is unavailable on this instance.</span>';
+    note.textContent=error instanceof Error?error.message:String(error);
+    button.disabled=false;
+    return;
+  }
+  if(!Array.isArray(scenarios)){panel.innerHTML='<span class="muted">The replay lab is unavailable on this instance.</span>';button.disabled=false;return}
   const blocks=[];
   let passed=0,total=0;
-  for(const scenario of scenarios){
-    const response=await fetch('/api/lab/replay',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({scenario:scenario.key})});
-    if(!response.ok){blocks.push('<div class="scenario"><h3>'+esc(scenario.title)+'</h3><p class="muted">Replay unavailable (HTTP '+response.status+').</p></div>');continue}
+  for(let i=0;i<scenarios.length;i++){
+    const scenario=scenarios[i];
+    note.textContent='Replaying scenario '+(i+1)+' of '+scenarios.length+'…';
+    let response;
+    try{
+      response=await fetch('/api/lab/replay',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({scenario:scenario.key})});
+    }catch(error){
+      total+=scenario.steps.length;
+      blocks.push('<div class="scenario"><h3>'+esc(scenario.title)+'</h3><p class="muted">Replay could not be delivered: '+esc(error instanceof Error?error.message:String(error))+'.</p></div>');
+      continue;
+    }
+    if(!response.ok){total+=scenario.steps.length;blocks.push('<div class="scenario"><h3>'+esc(scenario.title)+'</h3><p class="muted">Replay unavailable (HTTP '+response.status+').</p></div>');continue}
     const result=await response.json();
     passed+=result.passed;total+=result.total;
     const steps=result.steps.map(step=>'<div class="step '+(step.passed?'pass':'fail')+'"><div class="what"><strong>'+esc(step.label)+'</strong> — '+esc(step.expect)+'</div>'+
@@ -153,6 +199,7 @@ async function replay(){
   }
   panel.innerHTML=blocks.join('');
   note.textContent=passed+' of '+total+' deliveries behaved as declared. Replays run in an isolated sandbox and change nothing above.';
+  button.disabled=false;
 }
 document.querySelector('#replay').onclick=replay;
 refresh();

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { AnthropicDiagnosisEngine, AnthropicMessagesModel, DiagnosisUnavailableError, OpenAICompatibleChatModel, buildDiagnosisRequest, parseDiagnosis, type DiagnosisModel } from '../src/diagnosis.js';
-import { addAttempt, addProviderEvent, createRecoveryCase } from '../src/domain.js';
+import { addAction, addAttempt, addProviderEvent, createRecoveryCase } from '../src/domain.js';
 
 function caseWithFailure() {
   const base = createRecoveryCase('case-1', {
@@ -54,6 +54,32 @@ describe('parseDiagnosis', () => {
     }, 'claude-sonnet-5')).toThrow(DiagnosisUnavailableError);
   });
 
+  it('rejects output that is not a plain object at all', () => {
+    for (const value of ['transient', 42, null, ['transient']]) {
+      expect(() => parseDiagnosis(value, 'claude-sonnet-5')).toThrow(DiagnosisUnavailableError);
+    }
+  });
+
+  it('rejects an unsupported recommended action', () => {
+    expect(() => parseDiagnosis({
+      failureCategory: 'transient',
+      confidence: 0.9,
+      evidence: ['event-1'],
+      recommendedAction: 'refund',
+      explanation: 'x',
+    }, 'claude-sonnet-5')).toThrow(DiagnosisUnavailableError);
+  });
+
+  it('rejects a diagnosis with no explanation a human could read', () => {
+    expect(() => parseDiagnosis({
+      failureCategory: 'transient',
+      confidence: 0.9,
+      evidence: ['event-1'],
+      recommendedAction: 'retry',
+      explanation: '   ',
+    }, 'claude-sonnet-5')).toThrow(DiagnosisUnavailableError);
+  });
+
   it('rejects output with a confidence outside 0..1', () => {
     expect(() => parseDiagnosis({
       failureCategory: 'transient',
@@ -82,6 +108,15 @@ describe('buildDiagnosisRequest', () => {
     expect(serialized).toContain('event-1');
     expect(serialized).not.toContain('4111111111111111');
     expect(serialized).not.toContain('card_number');
+  });
+
+  it('tells the model how many bounded actions the case already took', () => {
+    const withActions = addAction(addAction(caseWithFailure(), { id: 'retry-1', kind: 'retry', status: 'failed', idempotencyKey: 'case-1:retry', createdAt: '2026-01-01T00:00:01.000Z' }, '2026-01-01T00:00:01.000Z'), { id: 'link-1', kind: 'fallback_link', status: 'submitted', idempotencyKey: 'case-1:fallback_link', providerReference: 'plink_1', expiresAt: '2026-01-02T00:00:00.000Z', createdAt: '2026-01-01T00:00:02.000Z' }, '2026-01-01T00:00:02.000Z');
+
+    const request = buildDiagnosisRequest(withActions);
+
+    expect(request.retriesAlreadyTaken).toBe(1);
+    expect(request.fallbackLinksAlreadyIssued).toBe(1);
   });
 });
 

@@ -122,6 +122,28 @@ describe('webhook boundary', () => {
     expect(await store.all()).toHaveLength(0);
   });
 
+  it('answers 413 for a webhook body too large to read', async () => {
+    const response = await post(`{"pad":"${'x'.repeat(1_100_000)}"}`);
+
+    expect(response.status).toBe(413);
+    expect(await store.all()).toHaveLength(0);
+  });
+
+  it('answers 422 when the loop fails on a delivery that named a real case', async () => {
+    await register();
+    // Simulate the store dying between the signature check and the locked ingest: the delivery
+    // itself was fine, so the failure is the loop's and must answer 422 rather than 500.
+    const originalWithCaseLock = store.withCaseLock.bind(store);
+    (store as unknown as { withCaseLock: typeof store.withCaseLock }).withCaseLock = async () => { throw new Error('database is unavailable'); };
+    try {
+      const response = await post(failedRenewal());
+
+      expect(response.status).toBe(422);
+    } finally {
+      (store as unknown as { withCaseLock: typeof store.withCaseLock }).withCaseLock = originalWithCaseLock;
+    }
+  });
+
   it('rejects a JSON array, which carries no event identity', async () => {
     const response = await post([failedRenewal()]);
 
@@ -166,31 +188,23 @@ describe('webhook boundary', () => {
   });
 
   it('registers a renewal once, tolerates the same registration again, and atomically refuses a conflicting one', async () => {
-    // Hold both old HTTP preflight reads open. They must both observe no case before either can
-    // enter the workflow; only the transaction-aware workflow may make the final decision.
-    const originalGet = store.get.bind(store);
-    let preflights = 0;
-    let releaseSecondPreflight!: () => void;
-    const secondPreflight = new Promise<void>((resolve) => { releaseSecondPreflight = resolve; });
-    store.get = async (id: string) => {
-      if (id !== 'case-1' || preflights >= 2) return originalGet(id);
-      preflights += 1;
-      if (preflights === 1) await secondPreflight;
-      else releaseSecondPreflight();
-      return originalGet(id);
-    };
-
     const [created, conflicting] = await Promise.all([
       register(),
       register('case-1', { ...context, amount: 9999 }),
     ]);
 
-    store.get = originalGet;
+    // The per-case lock serializes the two requests; exactly one creates the case and the other
+    // is refused. Which one wins is scheduling, so assert on the observed pair, not on an order.
     expect([created.status, conflicting.status].sort()).toEqual([201, 409]);
-    const again = await register();
+    const winner = created.status === 201 ? created : conflicting;
+    const winnerContext = created.status === 201 ? context : { ...context, amount: 9999 };
+    const winnerAmount = created.status === 201 ? 1200 : 9999;
+
+    // Re-registering the renewal that won is a no-op; the losing context stays a conflict.
+    const again = await register('case-1', winnerContext);
     expect(again.status).toBe(200);
     expect(await again.json()).toMatchObject({ registered: false });
-    expect((await store.get('case-1'))?.context.amount).toBe(1200);
+    expect((await store.get('case-1'))?.context.amount).toBe(winnerAmount);
   });
 
   it('records an unsupported event type without acting on the case', async () => {
@@ -297,6 +311,52 @@ describe('operator surface', () => {
     // Nothing moved: the token is checked before the body is read or the case is looked up.
     expect((await store.get('case-1'))?.status).toBe('retry_scheduled');
     expect(await store.get('case-2')).toBeUndefined();
+  });
+
+  it('rejects a credential that is not a bearer token even when the token is configured', async () => {
+    const response = await fetch(`${origin}/api/recovery-cases`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Basic dXNlcjpwYXNz' },
+      body: JSON.stringify({ id: 'case-1', context }),
+    });
+
+    expect(response.status).toBe(401);
+    expect(await store.all()).toHaveLength(0);
+  });
+
+  it('serves no control plane at all when no token was configured', async () => {
+    // An instance with no token has no control plane, so the routes do not exist. Answering 401
+    // would advertise what a token would unlock; answering 404 keeps the surface invisible.
+    const { controlPlaneToken: _token, ...tokenlessConfig } = config;
+    void _token;
+    const tokenless = createRecoveryApplication({ config: tokenlessConfig, clock: new FixedClock('2026-01-01T00:00:00.000Z'), store: new InMemoryRecoveryStore() });
+    const quiet = createServer(createRequestListener(tokenless));
+    await new Promise<void>((resolve) => quiet.listen(0, '127.0.0.1', resolve));
+    const quietOrigin = `http://127.0.0.1:${(quiet.address() as AddressInfo).port}`;
+
+    for (const path of ['/api/cases/case-1/stop', '/api/expire', '/api/recovery-cases']) {
+      expect((await fetch(`${quietOrigin}${path}`, { method: 'POST', body: '{}' })).status).toBe(404);
+    }
+    expect(await tokenless.store.all()).toHaveLength(0);
+    await new Promise<void>((resolve, reject) => quiet.close((error) => (error ? reject(error) : resolve())));
+  });
+
+  it('rejects a registration whose body is not an object the route can read', async () => {
+    const response = await fetch(`${origin}/api/recovery-cases`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${CONTROL_TOKEN}` },
+      body: '{"id":',
+    });
+
+    expect(response.status).toBe(400);
+    expect(await store.all()).toHaveLength(0);
+  });
+
+  it('requires both an id and a numeric amount to register a renewal', async () => {
+    expect((await control('/api/recovery-cases', { context })).status).toBe(400);
+    expect((await control('/api/recovery-cases', { id: 'case-1' })).status).toBe(400);
+    expect((await control('/api/recovery-cases', { id: 'case-1', context: { ...context, amount: '1200' } })).status).toBe(400);
+    expect(await store.all()).toHaveLength(0);
   });
 
   it('sweeps lapsed fallback links and reports the cases it exhausted', async () => {

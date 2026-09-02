@@ -55,6 +55,11 @@ describe('fallbackRecoveryMessage', () => {
     expect(fallbackRecoveryMessage(recoveryCase({ actions: [unresolvedLink()] }), now)).toBeUndefined();
   });
 
+  it('offers nothing while the link is still awaiting the provider acknowledgement', () => {
+    // A submitted-but-unacknowledged link has an expiry the provider may not honour yet.
+    expect(fallbackRecoveryMessage(recoveryCase({ actions: [link({ status: 'pending' })] }), now)).toBeUndefined();
+  });
+
   it('offers nothing once the renewal is paid, so a paid customer is never contacted again', () => {
     const paid = recoveryCase({ status: 'recovered', outcome: 'recovered', recoveredAmount: 129900 });
 

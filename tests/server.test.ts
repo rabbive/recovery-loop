@@ -1,10 +1,15 @@
-import { createServer } from 'node:http';
+import { createServer, type Server } from 'node:http';
 import { describe, expect, it, vi } from 'vitest';
 import { bootstrap, createRecoveryServer, publishSeededBatchIfMissing } from '../src/server.js';
 import { createRecoveryApplication } from '../src/application.js';
+import { createRequestListener } from '../src/http.js';
 import { InMemoryRecoveryStore } from '../src/recovery.js';
 import { FixedClock } from '../src/provider.js';
 import { loadConfig } from '../src/config.js';
+
+async function closeServer(server: Server): Promise<void> {
+  await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+}
 
 describe('server composition', () => {
   it('runs on a clock that moves, so fallback links can lapse and audit timestamps differ', () => {
@@ -73,5 +78,46 @@ describe('publishing the seeded batch on start', () => {
     await expect(bootstrap({ application: failing, server })).rejects.toThrow(/unreachable/);
 
     expect(listen).not.toHaveBeenCalled();
+  });
+});
+
+describe('bootstrapping into production', () => {
+  it('initializes the composed postgres store before publishing the batch and listening', async () => {
+    const application = createRecoveryApplication({ config: { port: 0, razorpayRecurringRetryEnabled: false, requireDatabase: false }, clock: new FixedClock('2026-01-01T00:00:00.000Z'), store: new InMemoryRecoveryStore() });
+    const initialize = vi.fn().mockResolvedValue(undefined);
+    const withStore = { ...application, postgresStore: { initialize } } as unknown as typeof application;
+    const server = createServer(createRequestListener(application));
+
+    await bootstrap({ application: withStore, server });
+
+    expect(initialize).toHaveBeenCalledTimes(1);
+    if (!server.listening) await new Promise<void>((resolve) => server.once('listening', () => resolve()));
+    expect(server.listening).toBe(true);
+    // A cold instance booted through the real entrypoint greets with figures, not zeroes.
+    expect(await application.evaluationRuns.latestRun()).toBeDefined();
+    await closeServer(server);
+  });
+
+  it('leaves the expiry sweep running for the life of the server and stops it on close', async () => {
+    vi.useFakeTimers();
+    try {
+      const application = createRecoveryApplication({ config: { port: 0, razorpayRecurringRetryEnabled: false, requireDatabase: false }, clock: new FixedClock('2026-01-01T00:00:00.000Z'), store: new InMemoryRecoveryStore() });
+      const sweep = vi.spyOn(application.expirySweeper, 'sweep');
+      const server = createServer(createRequestListener(application));
+
+      await bootstrap({ application, server });
+      if (!server.listening) await new Promise<void>((resolve) => server.once('listening', () => resolve()));
+      expect(sweep).toHaveBeenCalledTimes(1); // the startup tick
+
+      await vi.advanceTimersByTimeAsync(120_000);
+      const callsWhileServing = sweep.mock.calls.length;
+      expect(callsWhileServing).toBeGreaterThan(1);
+
+      await closeServer(server);
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(sweep.mock.calls.length).toBe(callsWhileServing);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

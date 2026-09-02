@@ -224,6 +224,14 @@ describe('Razorpay Test Mode recurring retry', () => {
     expect(requests.filter((request) => request.url.endsWith('/v1/payments/create/recurring'))).toHaveLength(1);
   });
 
+  it('refuses a duplicate-order response that replays to no order at all', async () => {
+    const { requests, provider } = razorpay({ duplicateOrder: true, orderLookupPayload: { items: [] } });
+    const result = await provider.submitRetry(mandateCase(), action('retry'));
+    expect(result.status).toBe('failed');
+    expect(result.message).toMatch(/no order exists for this action identity/);
+    expect(requests.filter((request) => request.url.endsWith('/v1/payments/create/recurring'))).toHaveLength(0);
+  });
+
   it.each([{}, { items: [{}] }])('does not create an order when the action-order lookup response is malformed', async (orderLookupPayload) => {
     const { requests, provider } = razorpay({ orderLookupPayload });
     const result = await provider.submitRetry(mandateCase(), action('retry'));
@@ -236,6 +244,25 @@ describe('Razorpay Test Mode recurring retry', () => {
     const result = await provider.submitRetry(mandateCase(), action('retry'));
     expect(result.status).toBe('failed');
     expect(requests.filter((request) => request.url.endsWith('/v1/payments/create/recurring'))).toHaveLength(0);
+  });
+
+  it('refuses an order lookup whose first item is not an order object', async () => {
+    const { requests, provider } = razorpay({ orderLookupPayload: { items: [42] } });
+    const result = await provider.submitRetry(mandateCase(), action('retry'));
+    expect(result.status).toBe('failed');
+    expect(result.message).toMatch(/malformed retry-order lookup/);
+    expect(requests.some((request) => request.method === 'POST')).toBe(false);
+  });
+
+  it('refuses when the original order subscription identity cannot be verified', async () => {
+    const { requests, provider } = razorpay({
+      payment: { id: 'pay_original', order_id: 'order-1', recurring: true, token_id: 'token_1', customer_id: 'customer-1', email: 'renewal@example.com', contact: '+919900000000', method: 'card', notes: {} },
+      originalOrder: null,
+    });
+    const result = await provider.submitRetry(mandateCase(), action('retry'));
+    expect(result.status).toBe('failed');
+    expect(result.message).toMatch(/could not verify the original order subscription identity/i);
+    expect(requests.some((request) => request.method === 'POST')).toBe(false);
   });
 
   it('accepts the registered subscription identity from the original order notes', async () => {
@@ -280,6 +307,14 @@ describe('Razorpay Test Mode recurring retry', () => {
     expect(result.status).toBe('failed');
     expect(result.message).toContain('400');
     expect(result.message).toContain('Your payment could not be completed');
+  });
+
+  it('refuses to charge when the original payment carries no amount and currency identity', async () => {
+    const { requests, provider } = razorpay({ payment: { id: 'pay_original', order_id: 'order-1', recurring: true, token_id: 'token_1', customer_id: 'customer-1', email: 'renewal@example.com', contact: '+919900000000', method: 'card', notes: {}, amount: undefined, currency: undefined } });
+    const result = await provider.submitRetry(mandateCase(), action('retry'));
+    expect(result.status).toBe('failed');
+    expect(result.message).toMatch(/no amount and currency identity/);
+    expect(requests.some((request) => request.method === 'POST')).toBe(false);
   });
 
   it('maps a failed original-payment lookup to a failed result instead of charging blind', async () => {

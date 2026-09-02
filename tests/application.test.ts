@@ -210,5 +210,15 @@ describe('application scaffold', () => {
     expect(() => loadConfig({ PORT: '3000', RAZORPAY_KEY_ID: 'key' })).toThrow(/configured together/);
     expect(() => loadConfig({ PORT: '3000', PINCC_API_KEY: 'pincc-key' })).toThrow(/PINCC_MODEL/);
     expect(() => loadConfig({ PORT: '3000', PINCC_API_KEY: 'pincc-key', PINCC_MODEL: 'model', PINCC_BASE_URL: 'http://v2.pincc.ai' })).toThrow(/HTTPS/);
+    // A base URL that is not a URL at all is the same deployment mistake as an http:// one.
+    expect(() => loadConfig({ PORT: '3000', PINCC_API_KEY: 'pincc-key', PINCC_MODEL: 'model', PINCC_BASE_URL: 'not a url' })).toThrow(/PINCC_BASE_URL/);
+  });
+
+  it('validates the diagnosis timeout instead of booting a broken timeout', () => {
+    expect(loadConfig({ PORT: '3000', DIAGNOSIS_TIMEOUT_MS: '2500' }).diagnosisTimeoutMilliseconds).toBe(2500);
+    expect(loadConfig({ PORT: '3000' }).diagnosisTimeoutMilliseconds).toBeUndefined();
+    for (const value of ['abc', '0', '-1', '1.5']) {
+      expect(() => loadConfig({ PORT: '3000', DIAGNOSIS_TIMEOUT_MS: value })).toThrow(/DIAGNOSIS_TIMEOUT_MS/);
+    }
   });
 });

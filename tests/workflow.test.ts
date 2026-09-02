@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Diagnosis, RecoveryCase } from '../src/domain.js';
 import { DeterministicSimulator, FixedClock, type SimulatorScenario } from '../src/provider.js';
-import { DeterministicPolicy, FixtureDiagnosisEngine, InMemoryRecoveryStore, RecoveryWorkflow } from '../src/recovery.js';
+import { DeterministicPolicy, FixtureDiagnosisEngine, InMemoryRecoveryStore, RecoveryWorkflow, type DiagnosisEngine } from '../src/recovery.js';
 import { DiagnosisUnavailableError } from '../src/diagnosis.js';
 
 const context = {
@@ -267,6 +267,16 @@ describe('RecoveryWorkflow diagnosis fail-safe', () => {
     expect(result.audit.some((event) => event.type === 'diagnosis_unavailable')).toBe(true);
   });
 
+  it('fails safe when the model resolves no diagnosis instead of one', async () => {
+    const store = new InMemoryRecoveryStore();
+    const provider = new DeterministicSimulator(new Map([['case-1', { retry: 'success', fallback: 'success', diagnosis: 'transient' } as SimulatorScenario]]));
+    const silent = { diagnose: async () => undefined } as unknown as DiagnosisEngine;
+    const workflow = new RecoveryWorkflow(store, provider, silent, new DeterministicPolicy(), new FixedClock('2026-01-01T00:00:00.000Z'), { maxDiagnosisAttempts: 2, sleep: async () => undefined });
+    await failed(workflow, provider);
+
+    await expect(workflow.drive('case-1')).rejects.toThrow(/ended without a diagnosis/);
+  });
+
   it('still attributes a correlated success after the case was escalated', async () => {
     const { workflow, provider } = setup(undefined, { retry: 'success', fallback: 'success', diagnosis: 'transient' });
     await failed(workflow, provider);
@@ -350,5 +360,33 @@ describe('success attribution', () => {
     expect(result.status).toBe('exhausted');
     expect(result.recoveredAmount).toBe(0);
     expect(result.audit.map((entry) => entry.type)).toContain('uncorrelated_success');
+  });
+});
+
+describe('RecoveryWorkflow fail-safes for a case nobody opened', () => {
+  it('refuses to ingest a delivery for a case that was never registered', async () => {
+    const { workflow, provider } = setup();
+
+    const event = provider.normalizeEvent({ id: 'event-ghost', type: 'payment_failed', caseId: 'case-ghost', occurredAt: '2026-01-01T00:00:00.000Z', payload: { method: 'recurring_mandate' } }, '2026-01-01T00:00:01.000Z');
+
+    await expect(workflow.ingestAndDrive(event)).rejects.toThrow('Recovery Case not found: case-ghost');
+  });
+
+  it('refuses an operator stop for a case that was never registered', async () => {
+    const { workflow } = setup();
+
+    await expect(workflow.stop('case-ghost')).rejects.toThrow('Recovery Case not found: case-ghost');
+  });
+
+  it('refuses an operator escalation for a case that was never registered', async () => {
+    const { workflow } = setup();
+
+    await expect(workflow.escalate('case-ghost')).rejects.toThrow('Recovery Case not found: case-ghost');
+  });
+
+  it('refuses to drive a case that was never registered', async () => {
+    const { workflow } = setup();
+
+    await expect(workflow.drive('case-ghost')).rejects.toThrow('Recovery Case not found: case-ghost');
   });
 });

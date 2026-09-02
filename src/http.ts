@@ -164,15 +164,18 @@ function readBody(request: IncomingMessage, maximumBytes = 1_000_000): Promise<s
     let body = '';
     let size = 0;
     request.setEncoding('utf8');
-    request.on('data', (chunk: string) => {
+    const onData = (chunk: string): void => {
       size += Buffer.byteLength(chunk);
       if (size > maximumBytes) {
+        // Reject without destroying the request: the route answers with the status it chose, and
+        // destroying the socket here would tear the connection down before that answer arrives.
+        request.removeListener('data', onData);
         reject(new Error('Webhook body is too large'));
-        request.destroy();
         return;
       }
       body += chunk;
-    });
+    };
+    request.on('data', onData);
     request.on('end', () => resolve(body));
     request.on('error', reject);
   });

@@ -111,6 +111,14 @@ describe('webhook replay lab', () => {
     expect((await replay('open', { caseId: 'case-1' })).status).toBe(400);
   });
 
+  it('rejects a replay request whose body is not JSON the route can read', async () => {
+    const response = await fetch(`${origin}/api/lab/replay`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"scenario":',
+    });
+
+    expect(response.status).toBe(400);
+  });
+
   it('leaves the canonical store and its published figures untouched', async () => {
     const before = await (await fetch(`${origin}/api/metrics`)).json() as Record<string, unknown>;
 

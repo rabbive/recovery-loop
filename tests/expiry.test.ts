@@ -172,6 +172,25 @@ describe('expiry schedule', () => {
     scheduler.stop();
   });
 
+  it('uses the default interval and error handler when no options are given', async () => {
+    vi.useFakeTimers();
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const { sweep, sweeper } = sweeperSpy();
+      sweep.mockRejectedValueOnce(new Error('store is down'));
+      const scheduler = startExpiryScheduler(sweeper);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(sweep).toHaveBeenCalledTimes(2);
+      expect(errorLog).toHaveBeenCalledWith('Recovery Loop expiry sweep failed', expect.objectContaining({ message: 'store is down' }));
+      scheduler.stop();
+    } finally {
+      errorLog.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('stops sweeping once the server has closed', async () => {
     vi.useFakeTimers();
     const { sweep, sweeper } = sweeperSpy();
